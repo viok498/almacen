@@ -4868,12 +4868,27 @@ function renderOrderDetail(orderId){
   const deshacerVinculacionBtn = numExpVinculacionManual
     ? `<button class="btn" id="deshacerVinculacionBtn" data-numexp="${escapeHtml(numExpVinculacionManual)}" style="background:#c0392b;color:#fff" title="Quitar la vinculación con la agencia (manual o del manifiesto) — el pedido volverá a 'Sin agencia'">❌ Quitar vínculo agencia</button>`
     : '';
-  const previsionHtml = (['validated','shipped'].includes(order.status) || pedidoTieneSeguimiento(order.id)) ? '' : (()=>{
+  // El selector para corregir la agencia a mano se muestra SIEMPRE que el pedido no esté
+  // ya finalizado (validado/enviado) — incluso si ya tiene una vinculación real — porque
+  // los enlaces manuales ("🔗 Vincular envío" sobre una etiqueta suelta, sin manifiesto)
+  // no llevan guardada la agencia, y sin este selector no había forma de decirle al
+  // sistema "esto va por OnTime" para que apareciera en la pestaña correcta de la Ruta.
+  const previsionHtml = ['validated','shipped'].includes(order.status) ? '' : (()=>{
     const actual = order.agenciaPrevistaManual || '';
     const opt = (val,label) => `<option value="${val}"${actual===val?' selected':''}>${label}</option>`;
+    const tieneSeguimiento = pedidoTieneSeguimiento(order.id);
+    let infoTexto;
+    if(tieneSeguimiento){
+      const real = agenciaRealDePedido(order.id);
+      infoTexto = real
+        ? `<span class="small" style="color:var(--text-muted)">Ya vinculado — agencia real: <strong>${escapeHtml(real)}</strong></span>`
+        : `<span class="small" style="color:var(--text-muted)">Ya vinculado, pero no se identificó la agencia (enlace manual) — corrígela aquí si la sabes</span>`;
+    } else {
+      infoTexto = previsionAgenciaBadge(order) || '<span class="small" style="color:var(--text-muted)">sin datos suficientes (falta peso o tarifa)</span>';
+    }
     return `<div class="inline" style="margin-top:8px;align-items:center;gap:8px;flex-wrap:wrap">
       <span class="small" style="font-weight:600">Previsión de agencia:</span>
-      ${previsionAgenciaBadge(order) || '<span class="small" style="color:var(--text-muted)">sin datos suficientes (falta peso o tarifa)</span>'}
+      ${infoTexto}
       <select id="previsionAgenciaSelect" class="input" style="width:auto">
         ${opt('','Automático')}${opt('ONTIME','ONTIME')}${opt('TXT','TXT')}${opt('TRANSHAER','TRANSHAER')}${opt('CAMPILLO','CAMPILLO')}
       </select>
@@ -5017,7 +5032,16 @@ function renderRutaPicking(){
   // Recoger todos los pedidos pendientes, y aplicar el filtro de agencia si hay uno activo,
   // usando la previsión (manual si existe, calculada si no). Los pedidos sin previsión
   // suficiente (falta peso o tarifa) no aparecen en las pestañas filtradas, solo en "General".
+  // Prioridad: 1) corrección manual (decisión explícita de oficina, manda siempre),
+  // 2) agencia REAL ya confirmada (detectada al subir el manifiesto), 3) previsión
+  // automática por peso/destino. Esto importa sobre todo para pedidos de ClassicGes
+  // (sin dirección del cliente, la previsión nunca se calcula) y para vinculaciones
+  // manuales ("🔗 Vincular envío" sobre etiqueta suelta, sin manifiesto) que no llevan
+  // guardada la agencia — sin esto, esos pedidos se quedarían encajados en "General".
   function agenciaDelPedido(order){
+    if(order.agenciaPrevistaManual) return order.agenciaPrevistaManual;
+    const real = agenciaRealDePedido(order.id);
+    if(real) return real;
     const p = previsionAgenciaInfo(order);
     return p?.agencia || null;
   }
@@ -5831,24 +5855,44 @@ function ocultarInputVincularAgencia(input){
   state.ui.vincularAgenciaOrder = null;
 }
 
+// Detecta la agencia a partir del propio código YA NORMALIZADO (solo dígitos, sin ceros
+// iniciales) que ha leído la pistola al escanear una etiqueta suelta. Basado en prefijos
+// reales confirmados con etiquetas físicas de Viok Sport: el código completo de OnTime
+// siempre empieza por "344", el de TXT por "380", y el de Transaher por "103" (confirmado
+// con una etiqueta física y corroborado con varios envíos distintos del histórico de
+// seguimiento de Transaher). Solo se aplica a escaneos largos (≥15 dígitos) porque un
+// número corto probablemente se ha escrito a mano (copiando solo una parte del código) y
+// no sigue este patrón — mejor dejarlo sin identificar (queda el desplegable manual como
+// red de seguridad) que asignar la agencia equivocada por adivinar.
+function detectarAgenciaDesdeCodigoEscaneado(numExp){
+  const v = String(numExp||'');
+  if(v.length < 15) return null;
+  if(v.startsWith('344')) return 'ONTIME';
+  if(v.startsWith('380')) return 'TXT';
+  if(v.startsWith('103')) return 'TRANSHAER';
+  return null;
+}
+
 async function vincularPedidoAAgencia(rawScan, orderId){
   if(!orderId){ alert('No se ha podido determinar a qué pedido vincular este escaneo.'); return; }
   const numExp = normalizeExpedicion(rawScan);
   if(!numExp){ alert('El código escaneado no contiene ningún número válido.'); return; }
   const order = (state.orders||[]).find(o=>o.id===orderId);
   if(!order){ alert('Pedido no encontrado.'); return; }
+  const agenciaDetectada = detectarAgenciaDesdeCodigoEscaneado(numExp);
 
   // Reflejar el cambio en pantalla al instante, sin esperar a que Firestore confirme.
   state.mapeoAgencias = state.mapeoAgencias || {};
-  state.mapeoAgencias[numExp] = { referencia: orderId, origen: 'manual', updatedAt: nowIso() };
+  state.mapeoAgencias[numExp] = { referencia: orderId, origen: 'manual', updatedAt: nowIso(), agencia: agenciaDetectada };
   renderOrders();
   renderOrderDetail(orderId);
 
   try{
     await setDoc(doc(db, 'warehouses', WAREHOUSE_ID, 'mapeoAgencias', numExp), {
-      referencia: orderId, updatedAt: serverTimestamp(), origen: 'manual'
+      referencia: orderId, updatedAt: serverTimestamp(), origen: 'manual',
+      ...(agenciaDetectada ? { agencia: agenciaDetectada } : {})
     }, { merge: true });
-    alert(`✓ Pedido ${orderId} vinculado al código de envío escaneado.`);
+    alert(`✓ Pedido ${orderId} vinculado al código de envío escaneado.${agenciaDetectada ? ` Agencia detectada: ${agenciaDetectada}.` : ''}`);
   }catch(err){
     alert('❌ No se pudo guardar el vínculo: ' + err.message);
     console.error(err);
