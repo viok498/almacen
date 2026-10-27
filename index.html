@@ -479,10 +479,11 @@ textarea{resize:vertical}
         <button id="informeDistBtn" class="btn" title="Excel para distribuidores: tarifa + disponibilidad (sin cantidades) + enlace web">📊 Informe distribuidores</button>
         <button id="importarTarifasDistBtn" class="btn" title="Cargar la tarifa de distribuidor (Precio 4) desde el listado de tarifas de ClassicGes">💶 Cargar tarifas</button>
         <input type="file" id="importarTarifasDistFile" accept=".xlsx,.xls" style="display:none">
-        <button id="toggleOutletBtn" class="btn" style="background:#e67e22;color:#fff">🔶 Ver Outlet</button>
+        <button id="verOutletBtn" class="btn invVistaBtn" data-vista="outlet" style="background:#e67e22;color:#fff">🔶 Outlet</button>
+        <button id="verFaltanBtn" class="btn invVistaBtn" data-vista="faltanPiezas" style="background:#c0392b;color:#fff">🔧 Faltan piezas</button>
       </div>
 
-      <div class="table-wrap" style="flex:1;min-height:0">
+      <div id="inventarioNormalWrap" class="table-wrap" style="flex:1;min-height:0">
         <table>
           <thead>
             <tr>
@@ -502,13 +503,22 @@ textarea{resize:vertical}
         </table>
       </div>
 
-      <!-- Inventario Outlet -->
-      <div id="outletSection" class="hidden" style="flex:1;min-height:0;margin-top:12px">
-        <div style="font-weight:700;font-size:14px;margin-bottom:8px;padding:6px 10px;background:#e67e22;color:#fff;border-radius:6px">🔶 Inventario Outlet</div>
-        <div id="outletTableWrap" style="overflow:auto">
+      <!-- Inventarios especiales (27/10/2026): Outlet y Faltan piezas. Viven en Firestore
+           (colecciones "outlet" y "faltanPiezas"), fuera de "inventory", así que NO cuentan en el
+           stock vendible ni suben a ningún canal. Cada documento es una entrada (EAN + uds + nota). -->
+      <div id="especialSection" class="hidden" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <div id="especialTitulo" style="font-weight:700;font-size:14px;margin-bottom:8px;padding:6px 10px;color:#fff;border-radius:6px"></div>
+        <div class="inline" style="margin-bottom:8px;gap:8px;flex-wrap:wrap">
+          <button id="especialVolverBtn" class="btn">📊 Volver al inventario normal</button>
+          <button id="especialImportBtn" class="btn" title="Columnas: EAN, Cantidad y (opcional) Nota">📥 Importar Excel/CSV</button>
+          <input type="file" id="especialImportFile" accept=".xlsx,.xls,.csv" style="display:none">
+          <button id="especialExportBtn" class="btn">📤 Exportar</button>
+          <span id="especialResumen" class="small" style="color:var(--text-muted)"></span>
+        </div>
+        <div class="table-wrap" style="flex:1;min-height:0">
           <table>
-            <thead><tr><th>EAN</th><th>Nombre</th><th>Stock Outlet</th><th>Fotos/Notas</th></tr></thead>
-            <tbody id="outletTableBody"></tbody>
+            <thead><tr><th>EAN</th><th>Nombre</th><th>Uds</th><th id="especialNotaTh">Nota</th><th>Origen</th><th>Fecha</th><th>Foto</th><th></th></tr></thead>
+            <tbody id="especialTableBody"></tbody>
           </table>
         </div>
       </div>
@@ -1929,6 +1939,8 @@ function defaultState(){
     // la agencia) -> nuestra referencia de pedido, cargado desde el manifiesto/relación
     // de expediciones que exporta cada agencia (TXT, etc.) tras importar el lote.
     mapeoAgencias: {},
+    // Inventarios especiales (Firestore, ver subscribeAll): [{id, ean, name, qty, nota, foto, origen, refOrigen, fecha}]
+    especial: { outlet: [], faltanPiezas: [] },
     devoluciones: [],
     listas: [],
     tareas: {},
@@ -2397,6 +2409,14 @@ function subscribeAll(){
     state.tarifas = snap.exists() ? (snap.data()||{}) : null; _previsionCache.clear();
     renderOrders();
   }, err=>console.warn('[tarifas] no se pudo sincronizar (no afecta al resto del SGA):', err?.message||err)));
+
+  // Inventarios especiales Outlet / Faltan piezas (27/10/2026). Opcionales, igual que los de arriba.
+  for(const tipo of ESPECIAL_TIPOS){
+    unsubscribers.push(onSnapshot(especialCol(tipo), snap=>{
+      state.especial[tipo] = snap.docs.map(d=>({ id:d.id, ...(d.data()||{}) }));
+      renderEspecialSiVisible(); renderInventoryTable();
+    }, err=>console.warn(`[${tipo}] no se pudo sincronizar (no afecta al resto del SGA):`, err?.message||err)));
+  }
 }
 
 function markLoaded(){
@@ -4955,9 +4975,11 @@ function renderInventoryTable(){
       ? `<strong style="color:var(--danger,#e53935)">${r.netDisponible}</strong>`
       : `<span style="color:var(--text-muted)">${r.netDisponible}</span>`;
     const soloCompBadge = esSoloComponente(r.ean) ? ` <span class="badge" style="background:rgba(46,117,182,0.2);color:var(--accent,#2e75b6)" title="Se publica siempre a 0 en WooCommerce, Amazon y Mirakl aunque tenga stock — solo se vende dentro de kits">🧩 Solo componente</span>` : '';
-    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
+    const espBadges = especialBadgesHtml(r.ean);
+    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
     // Listeners de los botones editar / borrar
     tr.querySelector('.edit-stock-btn').addEventListener('click', ()=>openEditStockModal(r.ean));
+    tr.querySelector('.mover-especial-btn').addEventListener('click', ()=>abrirModalMoverEspecial(r.ean));
     tr.querySelector('.delete-stock-btn').addEventListener('click', ()=>borrarFichaInventario(r.ean));
     tbody.appendChild(tr);
   });
@@ -6538,6 +6560,7 @@ function renderHistorial(){
       ensureInventoryLocal(btn.dataset.ean, inc.nombre||'');
       state.inventory.byEan[btn.dataset.ean].stockBase = Number(state.inventory.byEan[btn.dataset.ean].stockBase||0) + qty;
       await saveInventoryItemRemote(btn.dataset.ean, 'devolución: pieza recibida');
+      await resolverFaltaPorOrigen(inc.id, btn.dataset.ean); // cierra su entrada en Faltan piezas
       saveCache(); renderInventoryTable(); updateStats(); renderDevoluciones();
     });
   });
@@ -8264,6 +8287,7 @@ function renderDevoluciones(){
       ensureInventoryLocal(btn.dataset.ean, inc.nombre||'');
       state.inventory.byEan[btn.dataset.ean].stockBase = Number(state.inventory.byEan[btn.dataset.ean].stockBase||0) + qty;
       await saveInventoryItemRemote(btn.dataset.ean, 'devolución: pieza recibida');
+      await resolverFaltaPorOrigen(inc.id, btn.dataset.ean); // cierra su entrada en Faltan piezas
       saveCache(); renderInventoryTable(); updateStats(); renderDevoluciones();
     });
   });
@@ -8405,12 +8429,12 @@ function abrirModalRecepcion(devId){
         state.inventory.byEan[l.ean].stockBase = Number(state.inventory.byEan[l.ean].stockBase||0) + Number(l.qty||1);
         saveInventoryItemRemote(l.ean, 'recepción de devolución');
       }
-      if(estadoLinea[i]==='outlet'){
-        // Sumar al inventario outlet
-        if(!state.inventarioOutlet) state.inventarioOutlet = {};
-        if(!state.inventarioOutlet[l.ean]) state.inventarioOutlet[l.ean] = {name:l.name||l.ean, stock:0, fotos:[]};
-        state.inventarioOutlet[l.ean].stock += Number(l.qty||1);
-        if(l.foto) state.inventarioOutlet[l.ean].fotos.push({foto:l.foto, desc:l.descripcionIncidencia||'', fecha:new Date().toISOString()});
+      // Outlet / Falta pieza: la unidad devuelta NO entra al stock normal, va a su inventario
+      // especial en Firestore (la "pieza recibida" la devuelve luego al stock normal).
+      if(estadoLinea[i]==='outlet' || estadoLinea[i]==='falta'){
+        const tipoEsp = estadoLinea[i]==='outlet' ? 'outlet' : 'faltanPiezas';
+        crearEntradaEspecial(tipoEsp, { ean:l.ean, name:l.name||'', qty:Number(l.qty||1), nota:l.descripcionIncidencia||'', foto:l.foto||null, origen:'devolucion', refOrigen:dev.id })
+          .catch(err=>{ console.error('[devolución → '+tipoEsp+']', err); alert(`⚠️ No se pudo guardar "${l.name||l.ean}" en ${ESPECIAL_CFG[tipoEsp].nombre}: ${err?.message||err}`); });
       }
       if(estadoLinea[i]==='falta') hasIncident = true;
     });
@@ -8432,25 +8456,360 @@ function abrirModalRecepcion(devId){
   });
 }
 
-function renderOutletTable(){
-  const tbody = $('#outletTableBody'); if(!tbody) return;
-  const outlet = state.inventarioOutlet || {};
-  const keys = Object.keys(outlet);
-  if(!keys.length){ tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Sin artículos en outlet</td></tr>'; return; }
-  tbody.innerHTML = keys.map(ean=>{
-    const item = outlet[ean];
-    const fotosHtml = (item.fotos||[]).map((f,i)=>`
-      <div style="display:inline-block;margin:2px">
-        <img src="${f.foto}" style="width:60px;height:60px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="this.style.width=this.style.width==='60px'?'200px':'60px'" title="${escapeHtml(f.desc||'')}">
-      </div>`).join('');
-    return `<tr>
-      <td>${escapeHtml(ean)}</td>
-      <td>${escapeHtml(item.name||'')}</td>
-      <td><strong>${item.stock||0}</strong></td>
-      <td>${fotosHtml||'<span style="color:var(--text-muted);font-size:11px">Sin fotos</span>'}</td>
-    </tr>`;
+// ── Inventarios especiales: Outlet y Faltan piezas (27/10/2026, Víctor) ──
+// Sustituyen al antiguo state.inventarioOutlet, que no se guardaba en ningún sitio (se perdía
+// al recargar). Cada entrada es un documento en warehouses/<almacén>/<tipo>: EAN, uds, nota,
+// foto opcional y de dónde vino (devolución, incidencia, manual, excel). Están FUERA de
+// "inventory": no cuentan en el stock vendible ni los ven las Cloud Functions de stock, así que
+// nunca suben a Woo/Amazon/Mirakl. Al pasar unidades del stock normal a uno de estos
+// inventarios se descuentan del Base; al recibir la pieza que faltaba, vuelven al Base.
+const ESPECIAL_TIPOS = ['outlet', 'faltanPiezas'];
+const ESPECIAL_CFG = {
+  outlet:       { titulo:'🔶 Inventario Outlet', boton:'🔶 Outlet', color:'#e67e22', nota:'Motivo / estado', nombre:'Outlet' },
+  faltanPiezas: { titulo:'🔧 Productos a los que les faltan piezas', boton:'🔧 Faltan piezas', color:'#c0392b', nota:'Pieza que falta', nombre:'Faltan piezas' },
+};
+const ESPECIAL_ORIGEN = { devolucion:'Devolución', incidencia:'Incidencia', manual:'Manual', excel:'Excel/CSV', faltanPiezas:'Desde faltan piezas' };
+let _especialVista = null; // null = inventario normal
+
+function especialCol(tipo){ return collection(db, 'warehouses', WAREHOUSE_ID, tipo); }
+
+// Clave para comparar EANs con o sin ceros a la izquierda (Excel se los come).
+function eanClave(ean){
+  const s = String(ean == null ? '' : ean).trim();
+  return /^\d+$/.test(s) ? (s.replace(/^0+/, '') || s) : s;
+}
+// Devuelve la clave REAL de la ficha de inventario/catálogo para un EAN escrito a mano o leído
+// de un Excel (p. ej. "657" -> "0000000000657"); si no existe ficha, el propio EAN.
+function resolverEanInventario(raw){
+  const s = String(raw == null ? '' : raw).trim();
+  if(!s) return '';
+  const byEan = state.inventory?.byEan || {};
+  if(byEan[s]) return s;
+  const clave = eanClave(s);
+  const k = Object.keys(byEan).find(k=>eanClave(k)===clave);
+  if(k) return k;
+  const cat = itemByEAN(s) || findCatalogEquivalentByDigits(s);
+  return cat ? String(cat.EAN) : s;
+}
+function nombreDeEan(ean){ return state.inventory?.byEan?.[ean]?.name || itemByEAN(ean)?.NOMBRE || ''; }
+
+function especialUdsPorEan(tipo){
+  const m = {};
+  for(const e of (state.especial?.[tipo]||[])) m[eanClave(e.ean)] = (m[eanClave(e.ean)]||0) + Number(e.qty||0);
+  return m;
+}
+function especialBadgesHtml(ean){
+  const k = eanClave(ean);
+  return ESPECIAL_TIPOS.map(tipo=>{
+    const uds = (state.especial?.[tipo]||[]).reduce((s,e)=>eanClave(e.ean)===k ? s+Number(e.qty||0) : s, 0);
+    if(!uds) return '';
+    const c = ESPECIAL_CFG[tipo];
+    return ` <span class="badge" style="background:${c.color};color:#fff;cursor:pointer" title="${uds} ud. en ${c.nombre} (fuera del stock vendible)" onclick="mostrarVistaEspecial('${tipo}')">${c.boton.split(' ')[0]} ${uds}</span>`;
   }).join('');
 }
+
+async function crearEntradaEspecial(tipo, { ean, name, qty, nota='', foto=null, origen='manual', refOrigen='' }){
+  if(!db || !ean || !(Number(qty) > 0)) return null;
+  const ref = doc(especialCol(tipo));
+  await setDoc(ref, {
+    ean:String(ean), name:name||nombreDeEan(ean)||'', qty:Number(qty), nota:nota||'', foto:foto||null,
+    origen, refOrigen:refOrigen||'', fecha:new Date().toISOString(),
+    createdAt:serverTimestamp(), createdBy:currentUid||'anon',
+  });
+  return ref.id;
+}
+// Quita n uds de una entrada (la borra si se queda a 0).
+async function reducirEntradaEspecial(tipo, entrada, n){
+  const ref = doc(db, 'warehouses', WAREHOUSE_ID, tipo, entrada.id);
+  const resto = Number(entrada.qty||0) - n;
+  if(resto <= 0) await deleteDoc(ref);
+  else await updateDoc(ref, { qty:resto, updatedAt:serverTimestamp(), updatedBy:currentUid||'anon' });
+}
+async function moverStockNormal(ean, delta, name, origen){
+  ensureInventoryLocal(ean, name||'');
+  const row = state.inventory.byEan[ean];
+  row.stockBase = Math.max(0, Number(row.stockBase||0) + delta);
+  await saveInventoryItemRemote(ean, origen);
+}
+function pedirCantidadEspecial(entrada, accion){
+  const max = Number(entrada.qty||0);
+  if(max <= 1) return confirm(`${accion}: "${entrada.name||entrada.ean}" (1 ud.). ¿Continuar?`) ? 1 : 0;
+  const r = prompt(`${accion}: "${entrada.name||entrada.ean}". ¿Cuántas unidades? (máx. ${max})`, String(max));
+  if(r === null) return 0;
+  const n = parseInt(r, 10);
+  if(!(n > 0) || n > max){ alert(`Cantidad no válida: debe estar entre 1 y ${max}.`); return 0; }
+  return n;
+}
+
+// Cuando la entrada vino de una devolución o incidencia postventa (guardadas en este navegador),
+// la deja marcada como resuelta allí también, para que no quede el botón "Pieza recibida"
+// pendiente y nadie sume el stock dos veces.
+function marcarOrigenFaltaResuelto(entrada){
+  const d = (state.devoluciones||[]).find(x=>x.id===entrada.refOrigen);
+  if(!d) return;
+  if(d.tipo === 'postventa'){ d.piezaRecibida = true; d.status = 'processed'; }
+  else {
+    const line = (d.lines||[]).find(l=>eanClave(l.ean)===eanClave(entrada.ean) && l.estado==='falta');
+    if(line) line.estado = 'falta-resuelta';
+    if(!(d.lines||[]).some(l=>l.estado==='falta')) d.status = 'received';
+  }
+  saveCache(); try{ renderDevoluciones(); }catch(_){}
+}
+// Al revés: si la pieza se marca como recibida desde Devoluciones, se borra su entrada en
+// Faltan piezas (el stock ya lo suma ese botón).
+async function resolverFaltaPorOrigen(refOrigen, ean){
+  const e = (state.especial?.faltanPiezas||[]).find(x=>x.refOrigen===refOrigen && eanClave(x.ean)===eanClave(ean));
+  if(!e) return;
+  try{ await deleteDoc(doc(db, 'warehouses', WAREHOUSE_ID, 'faltanPiezas', e.id)); }
+  catch(err){ console.warn('[faltanPiezas] no se pudo cerrar la entrada', e.id, err); }
+}
+
+async function accionEspecial(tipo, id, accion){
+  const e = (state.especial?.[tipo]||[]).find(x=>x.id===id); if(!e) return;
+  try{
+    setSyncStatus('syncing');
+    if(accion === 'piezaRecibida'){
+      const n = pedirCantidadEspecial(e, 'Pieza recibida — vuelve al stock normal'); if(!n) return;
+      await reducirEntradaEspecial(tipo, e, n); // primero se cierra la entrada: así un doble clic no suma dos veces
+      await moverStockNormal(e.ean, +n, e.name, 'faltan piezas: pieza recibida');
+      if(n >= Number(e.qty||0)) marcarOrigenFaltaResuelto(e);
+    } else if(accion === 'aOutlet'){
+      const n = pedirCantidadEspecial(e, 'Pasar a Outlet'); if(!n) return;
+      await crearEntradaEspecial('outlet', { ean:e.ean, name:e.name, qty:n, nota:e.nota ? `Falta: ${e.nota}` : '', foto:e.foto, origen:'faltanPiezas', refOrigen:e.refOrigen });
+      await reducirEntradaEspecial(tipo, e, n);
+    } else if(accion === 'aStock'){
+      const n = pedirCantidadEspecial(e, 'Devolver al stock normal'); if(!n) return;
+      await reducirEntradaEspecial(tipo, e, n);
+      await moverStockNormal(e.ean, +n, e.name, `${ESPECIAL_CFG[tipo].nombre}: vuelta a stock`);
+    } else if(accion === 'baja'){
+      const n = pedirCantidadEspecial(e, tipo==='outlet' ? 'Vendido / dar de baja del outlet' : 'Dar de baja (despiece o desecho)'); if(!n) return;
+      await reducirEntradaEspecial(tipo, e, n);
+    }
+    setSyncStatus('ok');
+    renderInventoryTable(); updateStats();
+  }catch(err){
+    console.error('[inventario especial]', err);
+    setSyncStatus('error');
+    alert('No se pudo guardar el cambio: ' + (err?.message || err));
+  }
+}
+
+function mostrarVistaEspecial(tipo){
+  _especialVista = tipo || null;
+  $('#inventarioNormalWrap')?.classList.toggle('hidden', !!_especialVista);
+  $('#especialSection')?.classList.toggle('hidden', !_especialVista);
+  if(!_especialVista) return;
+  const c = ESPECIAL_CFG[_especialVista];
+  const t = $('#especialTitulo'); if(t){ t.textContent = c.titulo; t.style.background = c.color; }
+  const th = $('#especialNotaTh'); if(th) th.textContent = c.nota;
+  renderEspecialTabla();
+}
+function renderEspecialSiVisible(){
+  for(const tipo of ESPECIAL_TIPOS){
+    const btn = document.querySelector(`.invVistaBtn[data-vista="${tipo}"]`);
+    const uds = (state.especial?.[tipo]||[]).reduce((s,e)=>s+Number(e.qty||0), 0);
+    if(btn) btn.textContent = `${ESPECIAL_CFG[tipo].boton}${uds ? ` (${uds})` : ''}`;
+  }
+  if(_especialVista) renderEspecialTabla();
+}
+function renderEspecialTabla(){
+  const tipo = _especialVista; const tbody = $('#especialTableBody'); if(!tipo || !tbody) return;
+  const q = ($('#inventorySearch')?.value || '').trim().toLowerCase();
+  const todas = state.especial?.[tipo] || [];
+  const filas = todas
+    .filter(e=>!q || String(e.ean).toLowerCase().includes(q) || (e.name||'').toLowerCase().includes(q) || (e.nota||'').toLowerCase().includes(q) || (e.refOrigen||'').toLowerCase().includes(q))
+    .sort((a,b)=>String(b.fecha||'').localeCompare(String(a.fecha||'')));
+  const totalUds = todas.reduce((s,e)=>s+Number(e.qty||0), 0);
+  const res = $('#especialResumen'); if(res) res.textContent = `${todas.length} entrada(s) · ${totalUds} ud. — no cuentan en el stock vendible ni se publican en los canales`;
+  if(!filas.length){
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">${q ? 'Nada coincide con la búsqueda' : `Sin artículos en ${ESPECIAL_CFG[tipo].nombre}`}</td></tr>`;
+    return;
+  }
+  const btn = (accion, txt, title, estilo='') => `<button class="btn especialAccionBtn" data-accion="${accion}" title="${title}" style="padding:2px 8px;font-size:11px;${estilo}">${txt}</button>`;
+  tbody.innerHTML = filas.map(e=>{
+    const acciones = tipo === 'faltanPiezas'
+      ? btn('piezaRecibida','✅ Pieza recibida','Ha llegado la pieza: vuelve al stock normal','background:var(--ok,#4caf50);color:#fff') + ' ' + btn('aOutlet','🔶 A outlet','Pasar al inventario Outlet') + ' ' + btn('baja','🗑️','Dar de baja (despiece o desecho)')
+      : btn('baja','🛒 Vendido / baja','Vendido o dado de baja: sale del outlet') + ' ' + btn('aStock','↩️ A stock','Devolver al stock normal (vendible)');
+    const fecha = e.fecha ? new Date(e.fecha).toLocaleDateString('es-ES') : '';
+    const origen = (ESPECIAL_ORIGEN[e.origen] || e.origen || '') + (e.refOrigen ? ` ${e.refOrigen}` : '');
+    const foto = e.foto ? `<img src="${e.foto}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="this.style.width=this.style.width==='48px'?'220px':'48px';this.style.height=this.style.height==='48px'?'auto':'48px'">` : '<span style="color:var(--text-muted);font-size:11px">—</span>';
+    return `<tr data-id="${escapeHtml(e.id)}">
+      <td>${escapeHtml(e.ean)}</td><td>${escapeHtml(e.name||nombreDeEan(e.ean)||'')}</td><td><strong>${Number(e.qty||0)}</strong></td>
+      <td>${escapeHtml(e.nota||'')}</td><td class="small">${escapeHtml(origen)}</td><td class="small">${escapeHtml(fecha)}</td><td>${foto}</td>
+      <td style="white-space:nowrap">${acciones}</td></tr>`;
+  }).join('');
+  tbody.querySelectorAll('.especialAccionBtn').forEach(b=>b.addEventListener('click', ()=>accionEspecial(tipo, b.closest('tr').dataset.id, b.dataset.accion)));
+}
+
+// Comprime una foto a ~800px JPEG (igual que devoluciones/incidencias) para que quepa en el documento.
+function comprimirFotoEspecial(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ev=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const MAX = 800; let w = img.width, h = img.height;
+        if(w > MAX){ h = Math.round(h*MAX/w); w = MAX; }
+        const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = reject; img.src = ev.target.result;
+    };
+    reader.onerror = reject; reader.readAsDataURL(file);
+  });
+}
+
+// Botón 🔀 de cada ficha de Inventario: pasa uds del stock normal a Outlet o a Faltan piezas.
+function abrirModalMoverEspecial(ean){
+  const row = getInventoryRow(ean);
+  document.getElementById('moverEspecialModal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'moverEspecialModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:var(--panel,#1a2332);border-radius:10px;padding:20px;width:100%;max-width:380px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:4px">🔀 Sacar del stock normal</div>
+      <div style="font-size:12px;margin-bottom:2px">${escapeHtml(row.name||ean)}</div>
+      <div style="font-size:11px;color:var(--text-muted,#aaa);margin-bottom:12px">EAN: ${escapeHtml(ean)} · Base actual: ${Number(row.stockBase||0)}</div>
+      <div class="inline" style="gap:6px;margin-bottom:12px">
+        <button class="btn movEspDestBtn" data-dest="outlet" style="flex:1">${ESPECIAL_CFG.outlet.boton}</button>
+        <button class="btn movEspDestBtn" data-dest="faltanPiezas" style="flex:1">${ESPECIAL_CFG.faltanPiezas.boton}</button>
+      </div>
+      <label style="font-size:12px;font-weight:600">Unidades</label>
+      <input id="movEspQty" class="input" type="number" min="1" value="1" style="width:100%;margin:6px 0 10px 0">
+      <label id="movEspNotaLabel" style="font-size:12px;font-weight:600">Nota</label>
+      <input id="movEspNota" class="input" placeholder="" style="width:100%;margin:6px 0 10px 0">
+      <label style="font-size:12px;font-weight:600">Foto (opcional)</label>
+      <input id="movEspFoto" type="file" accept="image/*" capture="environment" style="width:100%;margin:6px 0 4px 0">
+      <div id="movEspFotoPreview" style="margin-bottom:10px"></div>
+      <div class="small" style="color:var(--text-muted);margin-bottom:12px">Las unidades se restan del Base y dejan de publicarse en los canales.</div>
+      <div class="inline" style="gap:8px">
+        <button id="movEspCancel" class="btn" style="flex:1">Cancelar</button>
+        <button id="movEspOk" class="btn" style="flex:1;background:var(--accent,#2e75b6);color:#fff">Mover</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  let destino = null, foto = null;
+  const elegir = d=>{
+    destino = d;
+    modal.querySelectorAll('.movEspDestBtn').forEach(b=>{
+      const on = b.dataset.dest === d;
+      b.style.background = on ? ESPECIAL_CFG[b.dataset.dest].color : ''; b.style.color = on ? '#fff' : '';
+    });
+    modal.querySelector('#movEspNotaLabel').textContent = ESPECIAL_CFG[d].nota;
+    modal.querySelector('#movEspNota').placeholder = d==='outlet' ? 'p. ej. golpe en la caja, rayado...' : 'p. ej. falta tornillería, falta manual...';
+  };
+  modal.querySelectorAll('.movEspDestBtn').forEach(b=>b.addEventListener('click', ()=>elegir(b.dataset.dest)));
+  elegir('outlet');
+  modal.querySelector('#movEspFoto').addEventListener('change', async ev=>{
+    const f = ev.target.files[0]; if(!f) return;
+    try{ foto = await comprimirFotoEspecial(f); modal.querySelector('#movEspFotoPreview').innerHTML = `<img src="${foto}" style="max-width:100%;border-radius:6px">`; }
+    catch(_){ alert('No se pudo leer la foto.'); }
+  });
+  modal.querySelector('#movEspCancel').addEventListener('click', ()=>modal.remove());
+  modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
+  modal.querySelector('#movEspOk').addEventListener('click', async ()=>{
+    const qty = parseInt(modal.querySelector('#movEspQty').value, 10);
+    const nota = modal.querySelector('#movEspNota').value.trim();
+    if(!(qty > 0)){ alert('Indica cuántas unidades.'); return; }
+    if(destino === 'faltanPiezas' && !nota){ alert('Indica qué pieza falta.'); return; }
+    const base = Number(state.inventory.byEan[ean]?.stockBase||0);
+    if(qty > base && !confirm(`El Base es ${base} y vas a sacar ${qty}. El Base se quedará a 0. ¿Continuar?`)) return;
+    const okBtn = modal.querySelector('#movEspOk'); okBtn.disabled = true; okBtn.textContent = 'Guardando...';
+    try{
+      setSyncStatus('syncing');
+      // Primero la entrada y luego el Base: si algo falla a medias, sobra una entrada (visible y
+      // corregible) en vez de desaparecer unidades del stock.
+      await crearEntradaEspecial(destino, { ean, name:row.name, qty, nota, foto, origen:'manual' });
+      await moverStockNormal(ean, -qty, row.name, `traspaso a ${ESPECIAL_CFG[destino].nombre}`);
+      setSyncStatus('ok');
+      modal.remove(); renderInventoryTable(); updateStats();
+    }catch(err){
+      console.error('[mover a inventario especial]', err);
+      setSyncStatus('error'); okBtn.disabled = false; okBtn.textContent = 'Mover';
+      alert('No se pudo guardar: ' + (err?.message || err));
+    }
+  });
+}
+
+// Importar entradas desde Excel/CSV: columnas EAN, Cantidad y (opcional) Nota. Si no hay fila
+// de cabecera, se asume ese orden. Pregunta si hay que descontarlas del stock normal (no, si es
+// la carga inicial de unidades que ya estaban apartadas y fuera del Base).
+async function importarEspecialDesdeArchivo(file){
+  const tipo = _especialVista; if(!tipo || !file) return;
+  const c = ESPECIAL_CFG[tipo];
+  let raw;
+  try{
+    const wb = readWorkbookSmart(await file.arrayBuffer());
+    raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'', raw:true });
+  }catch(err){ alert('No se pudo leer el archivo: ' + (err?.message || err)); return; }
+  const celda = v => typeof v === 'number' ? (Number.isInteger(v) ? v.toFixed(0) : String(v)) : String(v ?? '').trim();
+  let hdr = -1, cEan = 0, cQty = 1, cNota = 2;
+  for(let i=0; i<Math.min(10, raw.length); i++){
+    const r = raw[i].map(x=>celda(x).toLowerCase());
+    const iEan = r.findIndex(x=>/ean|c[oó]digo|sku|barcode/.test(x));
+    if(iEan >= 0){
+      hdr = i; cEan = iEan;
+      cQty = r.findIndex(x=>/cant|uds|unid|qty|stock/.test(x));
+      cNota = r.findIndex(x=>/nota|motivo|pieza|observ|descrip|coment/.test(x));
+      break;
+    }
+  }
+  const entradas = []; let saltadas = 0;
+  for(const r of raw.slice(hdr + 1)){
+    const eanTxt = celda(r[cEan]); if(!eanTxt) continue;
+    const qtyTxt = cQty >= 0 ? celda(r[cQty]) : '';
+    const qty = qtyTxt === '' ? 1 : parseInt(qtyTxt, 10);
+    if(!(qty > 0)){ saltadas++; continue; }
+    const ean = resolverEanInventario(eanTxt);
+    entradas.push({ ean, name:nombreDeEan(ean), qty, nota: cNota >= 0 ? celda(r[cNota]) : '' });
+  }
+  if(!entradas.length){ alert('No se ha encontrado ninguna fila válida (EAN + cantidad).'); return; }
+  const totalUds = entradas.reduce((s,e)=>s+e.qty, 0);
+  const sinFicha = entradas.filter(e=>!e.name).length;
+  if(!confirm(`Se van a añadir ${entradas.length} entrada(s), ${totalUds} ud. en total, a ${c.nombre}.` +
+    (sinFicha ? `\n\n⚠️ ${sinFicha} EAN(s) no tienen ficha en el inventario (se importan igualmente, sin nombre).` : '') +
+    (saltadas ? `\n${saltadas} fila(s) con cantidad no válida se ignoran.` : '') + '\n\n¿Continuar?')) return;
+  const descontar = confirm(`¿Descontar también esas unidades del stock normal (Base)?\n\nAceptar = SÍ, se restan del Base.\nCancelar = NO, ya estaban apartadas y fuera del stock normal.`);
+  const info = $('#especialResumen'); if(info) info.textContent = 'Importando...';
+  try{
+    setSyncStatus('syncing');
+    for(let i=0; i<entradas.length; i+=400){
+      const batch = writeBatch(db);
+      for(const e of entradas.slice(i, i+400)){
+        batch.set(doc(especialCol(tipo)), { ean:e.ean, name:e.name, qty:e.qty, nota:e.nota, foto:null, origen:'excel', refOrigen:file.name,
+          fecha:new Date().toISOString(), createdAt:serverTimestamp(), createdBy:currentUid||'anon' });
+      }
+      await batch.commit();
+    }
+    if(descontar){
+      const porEan = {};
+      for(const e of entradas) if(e.name) porEan[e.ean] = (porEan[e.ean]||0) + e.qty;
+      for(const [ean, n] of Object.entries(porEan)) await moverStockNormal(ean, -n, '', `traspaso a ${c.nombre} (Excel)`);
+    }
+    setSyncStatus('ok');
+    renderInventoryTable(); updateStats();
+    alert(`✅ Importadas ${entradas.length} entrada(s) (${totalUds} ud.) en ${c.nombre}.${descontar ? ' Descontadas del stock normal.' : ''}`);
+  }catch(err){
+    console.error('[importar inventario especial]', err);
+    setSyncStatus('error');
+    alert('Error al importar (puede que parte se haya guardado, revisa la tabla): ' + (err?.message || err));
+  }
+}
+
+function exportarEspecial(){
+  const tipo = _especialVista; if(!tipo) return;
+  const filas = (state.especial?.[tipo]||[]).map(e=>({
+    EAN:e.ean, Nombre:e.name||nombreDeEan(e.ean)||'', Uds:Number(e.qty||0), [ESPECIAL_CFG[tipo].nota]:e.nota||'',
+    Origen:ESPECIAL_ORIGEN[e.origen]||e.origen||'', Referencia:e.refOrigen||'', Fecha:e.fecha ? new Date(e.fecha).toLocaleDateString('es-ES') : '',
+  }));
+  if(!filas.length){ alert('No hay nada que exportar.'); return; }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filas), ESPECIAL_CFG[tipo].nombre.slice(0,31));
+  XLSX.writeFile(wb, `${tipo}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+window.mostrarVistaEspecial = mostrarVistaEspecial;
 
 function renderIncidentDetail(devId){
   const dev = (state.devoluciones||[]).find(d=>d.id===devId); if(!dev) return;
@@ -8488,6 +8847,7 @@ function renderIncidentDetail(devId){
       ensureInventoryLocal(ean, btn.dataset.name);
       state.inventory.byEan[ean].stockBase = Number(state.inventory.byEan[ean].stockBase||0) + qty;
       saveInventoryItemRemote(ean, 'devolución: pieza recibida');
+      resolverFaltaPorOrigen(devId2, ean); // cierra su entrada en Faltan piezas
       // Marcar línea como resuelta
       const dev2 = (state.devoluciones||[]).find(d=>d.id===devId2);
       if(dev2){
@@ -9221,18 +9581,18 @@ function abrirModalIncidenciaPostventa(){
     // Descontar del stock
     ensureInventoryLocal(ean, nombre);
     state.inventory.byEan[ean].stockBase = Math.max(0, Number(state.inventory.byEan[ean].stockBase||0) - qty);
-    await saveInventoryItemRemote(ean, 'salida / traspaso a outlet');
-
-    // Si destino es outlet, añadir al inventario outlet
-    if(destino === 'outlet'){
-      if(!state.inventarioOutlet) state.inventarioOutlet={};
-      if(!state.inventarioOutlet[ean]) state.inventarioOutlet[ean]={name:nombre, stock:0, fotos:[]};
-      state.inventarioOutlet[ean].stock += qty;
-      if(foto) state.inventarioOutlet[ean].fotos.push({foto, desc, fecha:new Date().toISOString()});
-    }
+    await saveInventoryItemRemote(ean, destino==='outlet' ? 'salida / traspaso a outlet' : 'salida / traspaso a faltan piezas');
 
     // Crear registro de incidencia
     const id = 'INC-' + String(((state.devoluciones||[]).filter(d=>d.id.startsWith('INC-')).length+1)).padStart(4,'0');
+
+    // La unidad pasa a su inventario especial (Firestore): Outlet o Faltan piezas.
+    try{
+      await crearEntradaEspecial(destino==='outlet' ? 'outlet' : 'faltanPiezas', { ean, name:nombre, qty, nota:desc, foto, origen:'incidencia', refOrigen:id });
+    }catch(err){
+      console.error('[incidencia → inventario especial]', err);
+      alert(`⚠️ Se ha descontado del stock, pero no se pudo guardar en ${destino==='outlet' ? 'Outlet' : 'Faltan piezas'}: ${err?.message||err}`);
+    }
     const inc = {
       id,
       tipo: 'postventa',
@@ -10364,18 +10724,14 @@ document.querySelectorAll('.subtabs button').forEach(btn=>btn.addEventListener('
   });
   $('#listaSelector')?.addEventListener('change', renderListaItems);
   $('#devolucionesSearch')?.addEventListener('input', renderDevoluciones);
-  $('#toggleOutletBtn')?.addEventListener('click', ()=>{
-    const sec = $('#outletSection');
-    const btn = $('#toggleOutletBtn');
-    if(sec.classList.contains('hidden')){
-      sec.classList.remove('hidden');
-      btn.textContent = '📊 Ver inventario normal';
-      renderOutletTable();
-    } else {
-      sec.classList.add('hidden');
-      btn.textContent = '🔶 Ver Outlet';
-    }
-  });
+  // Inventarios especiales: Outlet / Faltan piezas (el mismo botón vuelve al normal si ya estás en él)
+  document.querySelectorAll('.invVistaBtn').forEach(b=>b.addEventListener('click', ()=>
+    mostrarVistaEspecial(_especialVista === b.dataset.vista ? null : b.dataset.vista)));
+  $('#especialVolverBtn')?.addEventListener('click', ()=>mostrarVistaEspecial(null));
+  $('#especialImportBtn')?.addEventListener('click', ()=>$('#especialImportFile')?.click());
+  $('#especialImportFile')?.addEventListener('change', e=>{ const f = e.target.files[0]; e.target.value = ''; importarEspecialDesdeArchivo(f); });
+  $('#especialExportBtn')?.addEventListener('click', exportarEspecial);
+  $('#inventorySearch')?.addEventListener('input', renderEspecialSiVisible);
   $('#devolucionesFilter')?.addEventListener('change', renderDevoluciones);
   $('#historialSearch')?.addEventListener('input', renderHistorial);
   $('#historialFilter')?.addEventListener('change', renderHistorial);
