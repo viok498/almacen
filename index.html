@@ -4922,6 +4922,14 @@ async function importarTarifasDistribuidor(file){
     try{ setSyncStatus('error'); }catch(_){}
   }
 }
+// Artículos que las Cloud Functions publican SIEMPRE a 0 en Woo, Amazon y Mirakl, aunque tengan
+// stock (solo se venden como componente de kit). Copia de PUBLICAR_SIEMPRE_CERO en
+// functions/stock-common.js — si se cambia allí, cambiarlo aquí también. Guardados sin ceros.
+const PUBLICAR_SIEMPRE_CERO = new Set(['609143531275','657','444','7427251254984']);
+function esSoloComponente(ean){
+  const d = String(ean == null ? '' : ean).replace(/\D/g, '');
+  return PUBLICAR_SIEMPRE_CERO.has(d.replace(/^0+/, '') || d);
+}
 function renderInventoryTable(){
   const q = ($('#inventorySearch')?.value || '').trim().toLowerCase(); const tbody = $('#inventoryTableBody'); if(!tbody) return; tbody.innerHTML='';
   const eans = Array.from(new Set([...(state.inventory?.byEan ? Object.keys(state.inventory.byEan) : []), ...state.catalog.map(c=>c.EAN).filter(Boolean)]));
@@ -4946,7 +4954,8 @@ function renderInventoryTable(){
     const netCell = r.netDisponible < 0
       ? `<strong style="color:var(--danger,#e53935)">${r.netDisponible}</strong>`
       : `<span style="color:var(--text-muted)">${r.netDisponible}</span>`;
-    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
+    const soloCompBadge = esSoloComponente(r.ean) ? ` <span class="badge" style="background:rgba(46,117,182,0.2);color:var(--accent,#2e75b6)" title="Se publica siempre a 0 en WooCommerce, Amazon y Mirakl aunque tenga stock — solo se vende dentro de kits">🧩 Solo componente</span>` : '';
+    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
     // Listeners de los botones editar / borrar
     tr.querySelector('.edit-stock-btn').addEventListener('click', ()=>openEditStockModal(r.ean));
     tr.querySelector('.delete-stock-btn').addEventListener('click', ()=>borrarFichaInventario(r.ean));
