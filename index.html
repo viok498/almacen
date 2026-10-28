@@ -2375,7 +2375,7 @@ function subscribeAll(){
 
   unsubscribers.push(onSnapshot(collection(db, 'warehouses', WAREHOUSE_ID, 'orders'), snap=>{
     if(isPicking){ ordersLoaded = true; markLoaded(); return; }
-    state.orders = snap.docs.map(d=>({ id:d.id, ...(d.data()||{}) }));
+    state.orders = snap.docs.map(d=>marcarKitsEnPedido({ id:d.id, ...(d.data()||{}) }));
     state.orders.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     ordersLoaded = true;
     markLoaded();
@@ -6474,6 +6474,24 @@ async function initDefaultLabels(){
   if(dirty1){ await saveNaveRemote('NAVE-1'); console.log('[Init] Labels NAVE-1 inicializados'); }
   if(dirty2){ await saveNaveRemote('NAVE-2'); console.log('[Init] Labels NAVE-2 inicializados'); }
   if(dirty1 || dirty2) queueRenderAll();
+}
+
+// Los pedidos que crean las Cloud Functions (Woo, Mirakl, Amazon) llegan con el código del kit
+// en la línea pero SIN el flag esKit — expandKitLines solo corría al importar PDF/Excel. Sin el
+// flag, validar un pack (p. ej. "563") descontaba una ficha suelta "563" en vez de sus 20
+// losetas (28/10/2026, pedido Woo 47002). Se marca al cargar, salvo en pedidos ya cerrados o
+// líneas ya empezadas, que se validaron con la lógica anterior y no se deben reinterpretar.
+function marcarKitsEnPedido(order){
+  if(!Array.isArray(order.lines) || order.status === 'validated' || order.status === 'partial') return order;
+  let cambia = false;
+  const lines = order.lines.map(l=>{
+    if(l.esKit || l.esComponenteKit || Number(l.qtyPicked||0) > 0) return l;
+    const kit = KITS[String(l.ean).trim()];
+    if(!kit) return l;
+    cambia = true;
+    return { ...l, esKit:true, name: kit.nombre || l.name };
+  });
+  return cambia ? { ...order, lines } : order;
 }
 
 function expandKitLines(lines){
