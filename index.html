@@ -125,6 +125,7 @@ th{position:sticky;top:0;background:#0d1320}
      margin-left:auto — así que se le da su propia línea al final para que no se pierda
      entre las demás pestañas. */
   #logoutBtn{margin-left:0 !important;width:100%;order:99}
+  #sesionIndicador{margin-left:0 !important;width:100%;order:98;text-align:center;white-space:normal !important}
 }
 .hidden{display:none !important}
 #sobrestockPanel{display:none}
@@ -243,7 +244,8 @@ textarea{resize:vertical}
       <button class="btn" id="sobrestockTabBtn" data-panel="sobrestockPanel" style="background:#e67e22;color:#fff">📦 Sobrestock</button>
       <button class="btn" id="informesTabBtn" data-panel="informesPanel">📊 Informes</button>
       <button class="btn" id="borradosTabBtn" data-panel="borradosPanel" style="background:#c0392b;color:#fff">🗑️ Borrados</button>
-      <button class="btn ghost" id="logoutBtn" title="Cerrar sesión y volver a la pantalla de acceso" style="margin-left:auto">🚪 Salir</button>
+      <span id="sesionIndicador" style="display:none;margin-left:auto;padding:4px 10px;border-radius:14px;color:#fff;font-size:12px;white-space:nowrap;align-self:center"></span>
+      <button class="btn ghost" id="logoutBtn" title="Cerrar sesión y volver a la pantalla de acceso">🚪 Cerrar sesión</button>
     </div>
 
     <div class="actions">
@@ -810,6 +812,12 @@ textarea{resize:vertical}
         <button class="btn" id="tareasVozBtn" title="Dictar tarea" style="padding:8px 10px;font-size:18px">🎤</button>
         <button class="btn" id="tareasAddBtn" style="background:var(--accent,#2e75b6);color:#fff;min-height:44px;padding:0 14px">Añadir</button>
       </div>
+      <div class="inline" style="margin-bottom:12px;gap:6px;flex-wrap:wrap;font-size:12px">
+        <label>Para <select id="tareasResponsable" class="input" style="width:auto"></select></label>
+        <label>Prioridad <select id="tareasPrioridad" class="input" style="width:auto"><option value="media">Media</option><option value="alta">Alta</option><option value="baja">Baja</option></select></label>
+        <label>Fecha límite <input id="tareasFechaLimite" class="input" type="date" style="width:auto"></label>
+        <label id="tareasFiltroWrap" style="margin-left:auto;display:none">Ver <select id="tareasFiltro" class="input" style="width:auto"></select></label>
+      </div>
 
       <div id="tareasImportBox" style="display:none;margin-bottom:10px;padding:10px;border-radius:8px;background:rgba(46,117,182,0.12);border-left:3px solid var(--accent,#2e75b6);font-size:13px">Tareas nuevas: ahora se guardan de forma independiente para que no se pisen entre dispositivos. <button class="btn" id="tareasImportBtn" style="margin-left:6px">📥 Importar pendientes anteriores</button></div>
       <!-- Lista de tareas -->
@@ -947,6 +955,31 @@ const WAREHOUSE_ID = 'almacen_principal';
 // cosas como el inventario o la carga de tarifas. No es una restricción de seguridad —
 // ambos usuarios tienen el mismo acceso real a los datos — solo una vista simplificada.
 const SGA_USUARIO_PICKING = 'almacenvioksport@gmail.com';
+
+// Usuarios del SGA (27/10/2026): una cuenta por persona, con su rol. El rol decide la VISTA
+// (el almacén solo ve Picking/Kits/Tareas, como antes) y quién ve qué tareas; el acceso real a
+// los datos lo controlan las reglas de Firestore. "admin" = Víctor, control total (las futuras
+// funciones exclusivas suyas se comprueban con esAdmin()). Las contraseñas NUNCA van aquí.
+const SGA_USUARIOS = {
+  'victor@vioksport.es':         { nombre:'Víctor',       rol:'admin',          rolTxt:'Administrador',              area:'oficina', color:'#8e44ad' },
+  'comercial@vioksport.es':      { nombre:'José Joaquín', rol:'comercial',      rolTxt:'Comercial y coord. almacén', area:'oficina', color:'#2980b9', veAlmacen:true },
+  'info@vioksport.es':           { nombre:'María José',   rol:'atencion',       rolTxt:'Atención al cliente',        area:'oficina', color:'#16a085' },
+  'administracion@vioksport.es': { nombre:'Juan Antonio', rol:'administracion', rolTxt:'Administración e inventarios', area:'oficina', color:'#d35400' },
+  [SGA_USUARIO_PICKING]:         { nombre:'Almacén',      rol:'almacen',        rolTxt:'Almacén (cuenta compartida)', area:'almacen', color:'#27ae60', compartida:true },
+};
+let currentEmail = null;
+function usuarioActual(){ return SGA_USUARIOS[currentEmail] || { nombre:currentEmail||'?', rol:'desconocido', rolTxt:'Sin rol asignado', area:'oficina', color:'#7f8c8d' }; }
+function esAdmin(){ return usuarioActual().rol === 'admin'; }
+function nombreUsuario(email){ return SGA_USUARIOS[String(email||'').toLowerCase()]?.nombre || email || ''; }
+function pintarIndicadorSesion(){
+  const el = document.getElementById('sesionIndicador'); if(!el) return;
+  if(!currentEmail){ el.style.display = 'none'; return; }
+  const u = usuarioActual();
+  el.style.display = '';
+  el.style.background = u.color;
+  el.title = `Sesión iniciada como ${currentEmail} — ${u.rolTxt}`;
+  el.innerHTML = `👤 <strong>${escapeHtml(u.nombre)}</strong> <span style="opacity:.85">${escapeHtml(currentEmail)}</span>`;
+}
 
 // Definición de kits: EAN del kit -> { nombre, componentes:[{ean, nombre, qty}] }
 const KITS = {
@@ -2258,9 +2291,12 @@ async function initFirebase(){
       }
       if(user){
         currentUid = user.uid;
+        currentEmail = String(user.email||'').toLowerCase();
         if(loginOverlay) loginOverlay.style.display = 'none';
+        pintarIndicadorSesion();
+        document.body.dataset.rol = usuarioActual().rol;
         // Vista simplificada para el usuario de almacén: solo Picking + Kits.
-        const esUsuarioPicking = String(user.email||'').toLowerCase() === SGA_USUARIO_PICKING.toLowerCase();
+        const esUsuarioPicking = currentEmail === SGA_USUARIO_PICKING.toLowerCase();
         document.body.classList.toggle('modo-picking', esUsuarioPicking);
         setSyncStatus('connecting');
         await ensureRootPromise();
@@ -2269,7 +2305,7 @@ async function initFirebase(){
       } else {
         // Sin sesión (primera vez en este navegador, o se cerró sesión): mostrar el
         // formulario y no arrancar nada del SGA hasta que se autentique con éxito.
-        currentUid = null;
+        currentUid = null; currentEmail = null; pintarIndicadorSesion();
         if(loginOverlay) loginOverlay.style.display = 'flex';
       }
       resolve();
@@ -9209,16 +9245,72 @@ function tareasEscuchar(){
   _tareasUnsubs.push(onSnapshot(query(tareasCol(), where('hecha','==',false)), aplicar(_tareasM1), err));
   _tareasUnsubs.push(onSnapshot(query(tareasCol(), where('hechaFecha','>=',hace30)), aplicar(_tareasM2), err));
 }
+// ── Responsable y visibilidad (27/10/2026) ──
+// Campos nuevos: responsable (email de un usuario del SGA, o null = toda un área), area
+// ('almacen' | 'oficina'), prioridad, fechaLimite, descripcion, creadoPor, creadoPorEmail,
+// cerradaPor / cerradaPorNombre. Las tareas antiguas (sin estos campos) son de almacén.
+// Cada uno ve las suyas y las generales de su área (coordinación también las de almacén) y
+// las que ha creado; el administrador ve todas, con un filtro. Es solo la VISTA: los datos
+// son los mismos para todos.
+function tareaArea(t){ return t.area || (t.responsable ? (SGA_USUARIOS[t.responsable]?.area || 'oficina') : 'almacen'); }
+function tareaVisibleParaMi(t){
+  const u = usuarioActual(), area = tareaArea(t);
+  if(esAdmin()){
+    const f = $('#tareasFiltro')?.value || 'todas';
+    if(f === 'todas') return true;
+    if(f.startsWith('area:')) return !t.responsable && area === f.slice(5);
+    return t.responsable === f;
+  }
+  if(t.creadoPorEmail && t.creadoPorEmail === currentEmail) return true;
+  if(t.responsable) return t.responsable === currentEmail;
+  return area === 'almacen' ? (u.area === 'almacen' || !!u.veAlmacen) : u.area === 'oficina';
+}
+let _tareasControlesDe = null;
+function tareasPrepararControles(){
+  if(_tareasControlesDe === currentEmail) return;
+  _tareasControlesDe = currentEmail;
+  const personas = Object.entries(SGA_USUARIOS).filter(([,u])=>!u.compartida);
+  const opts = [['area:almacen','🏭 Almacén (todos)'], ['area:oficina','🏢 Oficina (todos)'], ...personas.map(([email,u])=>[email, `👤 ${u.nombre}`])];
+  const sel = $('#tareasResponsable');
+  if(sel){
+    sel.innerHTML = opts.map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
+    sel.value = SGA_USUARIOS[currentEmail] && !usuarioActual().compartida ? currentEmail : 'area:almacen';
+  }
+  const fw = $('#tareasFiltroWrap'), fs = $('#tareasFiltro');
+  if(fw) fw.style.display = esAdmin() ? '' : 'none';
+  if(fs && esAdmin()){
+    fs.innerHTML = [['todas','Todas'], ...opts].map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
+    fs.onchange = renderTareas;
+  }
+}
 function tareasVisibles(){
   const hoy = fechaLocalYMD(), D = tareasDate;
-  let items = tareasTodas().filter(t=>!t.borrada);
+  let items = tareasTodas().filter(t=>!t.borrada && tareaVisibleParaMi(t));
   if(D === hoy) items = items.filter(t=> (t.creadaFecha||hoy) <= hoy && (!t.hecha || t.hechaFecha === hoy));
   else items = items.filter(t=> t.creadaFecha === D || t.hechaFecha === D);
   items.sort((a,b)=> (a.hecha?1:0)-(b.hecha?1:0) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
   return items;
 }
 
+function tareaMetaHtml(t){
+  const hoy = fechaLocalYMD();
+  const fmt = f => { const [y,m,d] = String(f).split('-'); return `${d}/${m}`; };
+  const partes = [];
+  partes.push(t.responsable ? `👤 ${escapeHtml(nombreUsuario(t.responsable))}` : (tareaArea(t)==='oficina' ? '🏢 Oficina' : '🏭 Almacén'));
+  if(t.prioridad === 'alta') partes.push('<span style="color:var(--danger,#e53935);font-weight:700">🔴 Alta</span>');
+  else if(t.prioridad === 'baja') partes.push('<span>⚪ Baja</span>');
+  if(t.fechaLimite) partes.push(`<span style="${!t.hecha && t.fechaLimite < hoy ? 'color:var(--danger,#e53935);font-weight:700' : ''}">⏰ ${fmt(t.fechaLimite)}</span>`);
+  if(t.creadoPor) partes.push(`✍️ ${escapeHtml(t.creadoPor)}`);
+  if(t.hecha && (t.cerradaPorNombre || t.cerradaPor)){
+    const cuando = t.hechaAt ? new Date(t.hechaAt).toLocaleString('es-ES', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+    partes.push(`<span style="color:var(--ok,#4caf50)">✔ ${escapeHtml(t.cerradaPorNombre || nombreUsuario(t.cerradaPor))}${cuando ? ' · '+escapeHtml(cuando) : ''}</span>`);
+  }
+  return `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap">${partes.join('')}</div>` +
+    (t.descripcion ? `<div style="font-size:12px;margin-top:3px;color:var(--text-muted)">${escapeHtml(t.descripcion)}</div>` : '');
+}
+
 function renderTareas(){
+  tareasPrepararControles();
   const label = $('#tareasFechaLabel');
   if(label) label.textContent = tareasDateLabel(tareasDate);
   const list = $('#tareasList'); if(!list) return;
@@ -9237,6 +9329,7 @@ function renderTareas(){
       <div style="flex:1">
         <div style="font-size:15px;${t.hecha?'text-decoration:line-through;color:var(--text-muted)':''}">${escapeHtml(t.texto||'')}</div>
         ${antigua?`<div style="font-size:11px;color:var(--text-muted)">↩ Pendiente desde el ${fmt(t.creadaFecha)}</div>`:''}
+        ${tareaMetaHtml(t)}
       </div>
       <button class="tareaDelete" data-id="${escapeHtml(t.id)}" style="padding:4px 8px;font-size:14px;color:var(--danger,#e53);border:1px solid var(--danger,#e53);border-radius:6px;background:transparent;cursor:pointer">✕</button>
     </div>`;
@@ -9248,8 +9341,8 @@ function renderTareas(){
       const hecha = !t.hecha;
       try{
         await updateDoc(doc(db,'warehouses',WAREHOUSE_ID,'tareasV2',t.id), hecha
-          ? { hecha:true, hechaFecha:fechaLocalYMD(), hechaAt:new Date().toISOString() }
-          : { hecha:false, hechaFecha:null, hechaAt:null });
+          ? { hecha:true, hechaFecha:fechaLocalYMD(), hechaAt:new Date().toISOString(), cerradaPor:currentEmail||null, cerradaPorNombre:nombreUsuario(currentEmail) }
+          : { hecha:false, hechaFecha:null, hechaAt:null, cerradaPor:null, cerradaPorNombre:null });
       }catch(e){ console.error('[Tareas]', e); alert('No se pudo guardar el cambio: '+(e.message||e)); }
     });
   });
@@ -9269,7 +9362,14 @@ async function tareasAddTarea(){
   const ref = doc(tareasCol());
   input.value='';
   try{
-    await setDoc(ref, { texto, creadaFecha: (tareasDate >= hoy ? tareasDate : hoy), creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false });
+    const para = $('#tareasResponsable')?.value || 'area:almacen';
+    const responsable = para.startsWith('area:') ? null : para;
+    const area = para.startsWith('area:') ? para.slice(5) : (SGA_USUARIOS[para]?.area || 'oficina');
+    const fechaLimite = $('#tareasFechaLimite')?.value || null;
+    await setDoc(ref, { texto, creadaFecha: (tareasDate >= hoy ? tareasDate : hoy), creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false,
+      responsable, area, prioridad:$('#tareasPrioridad')?.value || 'media', fechaLimite, descripcion:'',
+      creadoPor:nombreUsuario(currentEmail), creadoPorEmail:currentEmail||null });
+    if($('#tareasFechaLimite')) $('#tareasFechaLimite').value = '';
   }catch(e){ console.error('[Tareas]', e); input.value = texto; alert('No se pudo guardar la tarea: '+(e.message||e)); }
 }
 
