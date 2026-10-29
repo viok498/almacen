@@ -215,6 +215,7 @@ textarea{resize:vertical}
     <input type="email" id="loginEmail" name="username" autocomplete="username" placeholder="Correo" class="input" required style="font-size:15px;padding:12px">
     <input type="password" id="loginPassword" name="password" autocomplete="current-password" placeholder="Contraseña" class="input" required style="font-size:15px;padding:12px">
     <button type="submit" id="loginSubmitBtn" class="btn" style="background:var(--accent,#60a5fa);color:#081019;font-weight:700;padding:12px;font-size:15px">Entrar</button>
+    <button type="button" id="loginOlvideBtn" style="background:none;border:none;color:var(--text-muted,#9ca3af);font-size:13px;cursor:pointer;text-decoration:underline">¿Has olvidado la contraseña?</button>
   </form>
 </div>
 
@@ -934,7 +935,7 @@ textarea{resize:vertical}
 
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
-import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
 import {
   getFirestore, collection, doc, setDoc, getDocs, onSnapshot,
   deleteDoc, updateDoc, deleteField, writeBatch, serverTimestamp, enableIndexedDbPersistence,
@@ -2268,7 +2269,7 @@ async function initFirebase(){
     e.preventDefault();
     const email = document.getElementById('loginEmail').value.trim();
     const password = document.getElementById('loginPassword').value;
-    loginError.textContent = '';
+    loginError.textContent = ''; loginError.style.color = '';
     loginSubmitBtn.disabled = true;
     loginSubmitBtn.textContent = 'Entrando...';
     try{
@@ -2279,6 +2280,15 @@ async function initFirebase(){
       loginSubmitBtn.disabled = false;
       loginSubmitBtn.textContent = 'Entrar';
     }
+  });
+  // Restablecer contraseña (29/10/2026): Firebase manda al correo un enlace para poner una nueva.
+  // El mensaje es el mismo exista o no la cuenta, para no revelar qué correos tienen acceso.
+  document.getElementById('loginOlvideBtn')?.addEventListener('click', async ()=>{
+    const email = (document.getElementById('loginEmail').value.trim() || prompt('Escribe tu correo del SGA:') || '').trim();
+    if(!email) return;
+    try{ await sendPasswordResetEmail(auth, email); }catch(err){ console.warn('[login] restablecer contraseña:', err?.code || err); }
+    loginError.style.color = 'var(--text,#e5e7eb)';
+    loginError.textContent = `Si ${email} tiene acceso al SGA, le llegará un correo para poner una contraseña nueva (mira también en spam).`;
   });
 
   return new Promise(resolve=>{
