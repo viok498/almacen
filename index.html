@@ -821,7 +821,12 @@ textarea{resize:vertical}
         <label>Prioridad <select id="tareasPrioridad" class="input" style="width:auto"><option value="media">Media</option><option value="alta">Alta</option><option value="baja">Baja</option></select></label>
         <label>Fecha límite <input id="tareasFechaLimite" class="input" type="date" style="width:auto"></label>
         <label id="tareasFiltroWrap" style="margin-left:auto;display:none">Ver <select id="tareasFiltro" class="input" style="width:auto"></select></label>
+        <button class="btn" id="tareasPlantillasBtn" style="display:none;font-size:12px" title="Rutina diaria y tareas recurrentes de cada persona">⚙️ Plantillas</button>
       </div>
+
+      <!-- Rutina diaria (29/10/2026): checklist fijo por persona, se reinicia cada día -->
+      <div id="rutinaBox" style="margin-bottom:12px"></div>
+      <div id="tablonTitulo" style="font-weight:700;font-size:13px;margin:4px 0 8px;color:var(--text-muted)">📌 TABLÓN</div>
 
       <div id="tareasImportBox" style="display:none;margin-bottom:10px;padding:10px;border-radius:8px;background:rgba(46,117,182,0.12);border-left:3px solid var(--accent,#2e75b6);font-size:13px">Tareas nuevas: ahora se guardan de forma independiente para que no se pisen entre dispositivos. <button class="btn" id="tareasImportBtn" style="margin-left:6px">📥 Importar pendientes anteriores</button></div>
       <!-- Lista de tareas -->
@@ -939,7 +944,7 @@ import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendP
 import {
   getFirestore, collection, doc, setDoc, getDocs, onSnapshot,
   deleteDoc, updateDoc, deleteField, writeBatch, serverTimestamp, enableIndexedDbPersistence,
-  increment, query, where, orderBy, limit
+  increment, query, where, orderBy, limit, runTransaction
 } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
 
 const FIREBASE_CONFIG = {
@@ -9348,6 +9353,18 @@ function tareasEscuchar(){
   const err = e=>{ console.error('[Tareas]', e); const l = document.getElementById('tareasList'); if(l) l.innerHTML = `<div class="note" style="padding:20px;color:var(--danger,#e53)">No se pudieron cargar las tareas: ${escapeHtml(e.message||String(e))}</div>`; };
   _tareasUnsubs.push(onSnapshot(query(tareasCol(), where('hecha','==',false)), aplicar(_tareasM1), err));
   _tareasUnsubs.push(onSnapshot(query(tareasCol(), where('hechaFecha','>=',hace30)), aplicar(_tareasM2), err));
+  // Rutina diaria y plantillas recurrentes (29/10/2026): colecciones pequeñas, se escuchan enteras.
+  const repintar = ()=>{ if(document.getElementById('tareasPanel') && !document.getElementById('tareasPanel').classList.contains('hidden')) renderTareas(); if(document.getElementById('plantillasModal')) renderPlantillasModal(); };
+  const errRut = e=>console.warn('[Rutina] no se pudo sincronizar:', e?.message||e);
+  _tareasUnsubs.push(onSnapshot(collection(db,'warehouses',WAREHOUSE_ID,'rutinas'), snap=>{
+    _rutinas = {}; snap.forEach(d=>{ _rutinas[d.id] = Array.isArray(d.data().items) ? d.data().items : []; }); repintar();
+  }, errRut));
+  _tareasUnsubs.push(onSnapshot(query(collection(db,'warehouses',WAREHOUSE_ID,'rutinaDias'), where('fecha','>=',hace30)), snap=>{
+    _rutinaDias = {}; snap.forEach(d=>{ _rutinaDias[d.id] = d.data().hechos || {}; }); repintar();
+  }, errRut));
+  _tareasUnsubs.push(onSnapshot(collection(db,'warehouses',WAREHOUSE_ID,'tareasRecurrentes'), snap=>{
+    _plantillas = snap.docs.map(d=>({ id:d.id, ...d.data() })); repintar();
+  }, errRut));
 }
 // ── Responsable y visibilidad (27/10/2026) ──
 // Campos nuevos: responsable (email de un usuario del SGA, o null = toda un área), area
@@ -9382,6 +9399,8 @@ function tareasPrepararControles(){
   }
   const fw = $('#tareasFiltroWrap'), fs = $('#tareasFiltro');
   if(fw) fw.style.display = esAdmin() ? '' : 'none';
+  const pb = $('#tareasPlantillasBtn');
+  if(pb){ pb.style.display = esAdmin() ? '' : 'none'; pb.onclick = abrirPlantillasModal; }
   if(fs && esAdmin()){
     fs.innerHTML = [['todas','Todas'], ...opts].map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
     fs.onchange = renderTareas;
@@ -9390,9 +9409,12 @@ function tareasPrepararControles(){
 function tareasVisibles(){
   const hoy = fechaLocalYMD(), D = tareasDate;
   let items = tareasTodas().filter(t=>!t.borrada && tareaVisibleParaMi(t));
-  if(D === hoy) items = items.filter(t=> (t.creadaFecha||hoy) <= hoy && (!t.hecha || t.hechaFecha === hoy));
+  // Las diarias que no se hicieron "caducan" (las marca la function de recurrentes): fuera del tablón
+  // de hoy, pero se ven como "no se hizo" al consultar su día.
+  if(D === hoy) items = items.filter(t=> !t.caducada && (t.creadaFecha||hoy) <= hoy && (!t.hecha || t.hechaFecha === hoy));
   else items = items.filter(t=> t.creadaFecha === D || t.hechaFecha === D);
-  items.sort((a,b)=> (a.hecha?1:0)-(b.hecha?1:0) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
+  const PRI = { alta:0, media:1, baja:2 };
+  items.sort((a,b)=> (a.hecha||a.caducada?1:0)-(b.hecha||b.caducada?1:0) || (PRI[a.prioridad]??1)-(PRI[b.prioridad]??1) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
   return items;
 }
 
@@ -9401,6 +9423,9 @@ function tareaMetaHtml(t){
   const fmt = f => { const [y,m,d] = String(f).split('-'); return `${d}/${m}`; };
   const partes = [];
   partes.push(t.responsable ? `👤 ${escapeHtml(nombreUsuario(t.responsable))}` : (tareaArea(t)==='oficina' ? '🏢 Oficina' : '🏭 Almacén'));
+  if(t.recurrenteId) partes.push(`🔁 ${escapeHtml(textoFrecuencia(_plantillas.find(p=>p.id===t.recurrenteId) || { frecuencia:t.frecuencia }))}`);
+  if(t.momento) partes.push(`🕓 Por la ${escapeHtml(t.momento.replace(/^por la /i,''))}`);
+  if(t.caducada) partes.push('<span style="color:var(--danger,#e53935);font-weight:700">✗ No se hizo</span>');
   if(t.prioridad === 'alta') partes.push('<span style="color:var(--danger,#e53935);font-weight:700">🔴 Alta</span>');
   else if(t.prioridad === 'baja') partes.push('<span>⚪ Baja</span>');
   if(t.fechaLimite) partes.push(`<span style="${!t.hecha && t.fechaLimite < hoy ? 'color:var(--danger,#e53935);font-weight:700' : ''}">⏰ ${fmt(t.fechaLimite)}</span>`);
@@ -9417,11 +9442,12 @@ function renderTareas(){
   tareasPrepararControles();
   const label = $('#tareasFechaLabel');
   if(label) label.textContent = tareasDateLabel(tareasDate);
+  renderRutina();
   const list = $('#tareasList'); if(!list) return;
   const hoy = fechaLocalYMD();
   const items = tareasVisibles();
   if(!items.length){
-    list.innerHTML = '<div class="note" style="padding:30px;text-align:center;color:var(--text-muted)">No hay tareas para este día.<br>Añade una arriba.</div>';
+    list.innerHTML = '<div class="note" style="padding:30px;text-align:center;color:var(--text-muted)">No hay tareas en el tablón para este día.<br>Añade una arriba.</div>';
     return;
   }
   const fmt = f => { const [y,m,d] = String(f).split('-'); return `${d}/${m}`; };
@@ -9435,6 +9461,7 @@ function renderTareas(){
         ${antigua?`<div style="font-size:11px;color:var(--text-muted)">↩ Pendiente desde el ${fmt(t.creadaFecha)}</div>`:''}
         ${tareaMetaHtml(t)}
       </div>
+      ${esAdmin() && t.recurrenteId && t.responsable && !t.hecha && !t.caducada ? `<button class="tareaARutina btn" data-rec="${escapeHtml(t.recurrenteId)}" title="Ya está asumida: pasarla a la rutina diaria de ${escapeHtml(nombreUsuario(t.responsable))}" style="padding:4px 8px;font-size:12px">➡️ Rutina</button>` : ''}
       <button class="tareaDelete" data-id="${escapeHtml(t.id)}" style="padding:4px 8px;font-size:14px;color:var(--danger,#e53);border:1px solid var(--danger,#e53);border-radius:6px;background:transparent;cursor:pointer">✕</button>
     </div>`;
   }).join('');
@@ -9450,6 +9477,7 @@ function renderTareas(){
       }catch(e){ console.error('[Tareas]', e); alert('No se pudo guardar el cambio: '+(e.message||e)); }
     });
   });
+  list.querySelectorAll('.tareaARutina').forEach(btn=>btn.addEventListener('click', ()=>pasarPlantillaARutina(btn.dataset.rec)));
   list.querySelectorAll('.tareaDelete').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       if(!confirm('¿Borrar esta tarea?')) return;
@@ -9475,6 +9503,229 @@ async function tareasAddTarea(){
       creadoPor:nombreUsuario(currentEmail), creadoPorEmail:currentEmail||null });
     if($('#tareasFechaLimite')) $('#tareasFechaLimite').value = '';
   }catch(e){ console.error('[Tareas]', e); input.value = texto; alert('No se pudo guardar la tarea: '+(e.message||e)); }
+}
+
+// ── Rutina diaria y tareas recurrentes (29/10/2026, Víctor) ──
+// RUTINA: checklist fijo por persona (warehouses/{W}/rutinas/{email} -> items) que se marca cada día;
+// lo marcado vive en rutinaDias/{fecha}_{email}, así que cada día empieza sin marcar.
+// RECURRENTES: plantillas del tablón (tareasRecurrentes) que la Cloud Function tareas-recurrentes.js
+// convierte cada mañana laborable en tareas de tareasV2 (diarias: si no se hacen caducan; semanales y
+// mensuales: siguen pendientes hasta hacerse; "según aviso": se lanzan a mano). Solo el admin las gestiona.
+let _rutinas = {}, _rutinaDias = {}, _plantillas = [];
+const DIAS_SEMANA = ['', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes'];
+const URL_RECURRENTES_AHORA = 'https://tareasrecurrentesahora-dfqyhilaha-uc.a.run.app';
+function textoFrecuencia(p){
+  if(p.frecuencia === 'semanal') return `cada ${DIAS_SEMANA[p.diaSemana] || '?'}`;
+  if(p.frecuencia === 'mensual') return 'mensual (1er laborable)';
+  if(p.frecuencia === 'aviso') return 'según aviso';
+  return p.frecuencia === 'diaria' ? 'diaria' : 'recurrente';
+}
+function rutinaPersonasAMostrar(){
+  if(esAdmin()){
+    const f = $('#tareasFiltro')?.value || 'todas';
+    if(SGA_USUARIOS[f]) return [f];
+    if(f.startsWith('area:')) return Object.keys(_rutinas).filter(e=>(SGA_USUARIOS[e]?.area || 'oficina') === f.slice(5));
+    return Object.keys(SGA_USUARIOS).filter(e=>_rutinas[e]);
+  }
+  if(!currentEmail) return [];
+  return usuarioActual().veAlmacen ? [currentEmail, SGA_USUARIO_PICKING] : [currentEmail];
+}
+function renderRutina(){
+  const box = $('#rutinaBox'), titulo = $('#tablonTitulo'); if(!box) return;
+  const D = tareasDate, editable = D === fechaLocalYMD();
+  const personas = rutinaPersonasAMostrar().filter(e=>(_rutinas[e]||[]).length);
+  if(titulo) titulo.style.display = personas.length ? '' : 'none';
+  if(!personas.length){ box.innerHTML = ''; return; }
+  const hora = iso => { try{ return new Date(iso).toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' }); }catch(_){ return ''; } };
+  box.innerHTML = `<div style="font-weight:700;font-size:13px;margin:4px 0 8px;color:var(--text-muted)">☀️ RUTINA DIARIA</div>` + personas.map(email=>{
+    const items = _rutinas[email] || [], hechos = _rutinaDias[`${D}_${email}`] || {};
+    const n = items.filter(i=>hechos[i.id]).length;
+    const cabecera = (personas.length > 1 || email !== currentEmail)
+      ? `<div style="font-size:12px;font-weight:700;margin-bottom:2px">👤 ${escapeHtml(nombreUsuario(email))} <span style="color:var(--text-muted);font-weight:400">· ${n}/${items.length}</span></div>`
+      : `<div style="font-size:11px;color:var(--text-muted);margin-bottom:2px">${n}/${items.length} hechas</div>`;
+    return `<div style="background:var(--panel,#1a2332);border-radius:10px;padding:8px 12px;margin-bottom:8px;border-left:4px solid ${SGA_USUARIOS[email]?.color || '#7f8c8d'}">${cabecera}` +
+      items.map(i=>{
+        const h = hechos[i.id];
+        return `<label style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;cursor:${editable ? 'pointer' : 'default'}">
+          <input type="checkbox" class="rutinaCheck" data-email="${escapeHtml(email)}" data-id="${escapeHtml(i.id)}" ${h ? 'checked' : ''} ${editable ? '' : 'disabled'} style="width:20px;height:20px;margin-top:1px;flex-shrink:0">
+          <span style="flex:1;font-size:14px"><span style="${h ? 'text-decoration:line-through;color:var(--text-muted)' : ''}">${escapeHtml(i.texto || '')}</span>
+          ${i.descripcion ? `<div style="font-size:12px;color:var(--text-muted)">${escapeHtml(i.descripcion)}</div>` : ''}
+          ${h ? `<div style="font-size:11px;color:var(--ok,#4caf50)">✔ ${escapeHtml(h.porNombre || '')} · ${hora(h.at)}</div>` : (!editable ? '<div style="font-size:11px;color:var(--danger,#e53935)">✗ No marcada</div>' : '')}</span>
+        </label>`;
+      }).join('') + `</div>`;
+  }).join('');
+  box.querySelectorAll('.rutinaCheck').forEach(cb=>cb.addEventListener('change', ()=>marcarRutina(cb.dataset.email, cb.dataset.id, cb.checked)));
+}
+async function marcarRutina(email, id, hecho){
+  const D = fechaLocalYMD();
+  const ref = doc(db, 'warehouses', WAREHOUSE_ID, 'rutinaDias', `${D}_${email}`);
+  try{
+    if(hecho) await setDoc(ref, { fecha:D, email, hechos:{ [id]:{ at:new Date().toISOString(), por:currentEmail || null, porNombre:nombreUsuario(currentEmail) } } }, { merge:true });
+    else await updateDoc(ref, { [`hechos.${id}`]: deleteField() });
+  }catch(e){ console.error('[Rutina]', e); alert('No se pudo guardar: ' + (e.message || e)); renderTareas(); }
+}
+
+// Plantillas (solo admin)
+function plantillasCol(){ return collection(db, 'warehouses', WAREHOUSE_ID, 'tareasRecurrentes'); }
+function rutinaRef(email){ return doc(db, 'warehouses', WAREHOUSE_ID, 'rutinas', email); }
+async function rutinaCambiarItems(email, fn){
+  await runTransaction(db, async tx=>{
+    const s = await tx.get(rutinaRef(email));
+    const items = (s.exists() && Array.isArray(s.data().items)) ? s.data().items : [];
+    tx.set(rutinaRef(email), { items:fn(items), actualizadaAt:new Date().toISOString() }, { merge:true });
+  });
+}
+async function generarRecurrentesAhora(id){
+  const resp = await fetch(URL_RECURRENTES_AHORA, { method:'POST', headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${await auth.currentUser.getIdToken()}` }, body:JSON.stringify(id ? { id } : {}) });
+  const r = await resp.json().catch(()=>({}));
+  if(!resp.ok || !r.ok) throw new Error(r.error || `respuesta ${resp.status}`);
+  return r;
+}
+async function pasarPlantillaARutina(id){
+  const p = _plantillas.find(x=>x.id===id); if(!p) return;
+  if(!p.responsable){ alert('Esta plantilla es de un área, no de una persona: la rutina es por persona.'); return; }
+  if(!confirm(`¿Pasar «${p.texto}» a la rutina diaria de ${nombreUsuario(p.responsable)}?\n\nDejará de generarse en el tablón y le saldrá cada día en su rutina.`)) return;
+  try{
+    await rutinaCambiarItems(p.responsable, items=>[...items, { id:`r${Date.now().toString(36)}`, texto:p.texto || '', descripcion:p.descripcion || '' }]);
+    await updateDoc(doc(plantillasCol(), id), { activa:false, pasadaARutinaAt:new Date().toISOString() });
+    for(const t of tareasTodas().filter(t=>t.recurrenteId===id && !t.hecha && !t.borrada && !t.caducada)){
+      await updateDoc(doc(tareasCol(), t.id), { borrada:true, borradaAt:new Date().toISOString(), motivo:'pasada a rutina' });
+    }
+  }catch(e){ console.error('[Plantillas]', e); alert('No se pudo pasar a la rutina: ' + (e.message || e)); }
+}
+async function lanzarPlantillaSga(id){
+  const p = _plantillas.find(x=>x.id===id); if(!p) return;
+  const detalle = prompt(`Lanzar ahora «${p.texto}».\n\nDetalle de esta vez (opcional, p. ej. proveedor y productos):`, '');
+  if(detalle === null) return;
+  const hoy = fechaLocalYMD();
+  try{
+    await setDoc(doc(tareasCol()), {
+      texto:p.texto || '', descripcion:[p.descripcion, detalle.trim()].filter(Boolean).join('\n'),
+      creadaFecha:hoy, creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false,
+      responsable:p.responsable || null, area:p.area || 'oficina', prioridad:p.prioridad || 'media', fechaLimite:null,
+      momento:p.momento || null, recurrenteId:id, frecuencia:p.frecuencia, cicloFecha:hoy,
+      creadoPor:nombreUsuario(currentEmail), creadoPorEmail:currentEmail || null,
+    });
+    alert('✅ Tarea creada en el tablón.');
+  }catch(e){ alert('No se pudo crear: ' + (e.message || e)); }
+}
+let _plantPara = null;
+function abrirPlantillasModal(){
+  document.getElementById('plantillasModal')?.remove();
+  if(!_plantPara) _plantPara = 'info@vioksport.es';
+  const modal = document.createElement('div');
+  modal.id = 'plantillasModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.6);display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow:auto';
+  const opts = [...Object.entries(SGA_USUARIOS).map(([e,u])=>[e, `👤 ${u.nombre}`]), ['area:oficina','🏢 Oficina (todos)'], ['area:almacen','🏭 Almacén (todos)']];
+  modal.innerHTML = `
+    <div style="background:var(--panel,#1a2332);border-radius:10px;padding:18px;width:100%;max-width:640px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="font-weight:700;font-size:15px;flex:1">⚙️ Rutina y tareas recurrentes</div>
+        <button class="btn" id="plantGenerarBtn" style="font-size:12px" title="Crear ya en el tablón las recurrentes que tocan hoy">🔄 Generar las de hoy</button>
+        <button class="btn" id="plantCerrarBtn">✕</button>
+      </div>
+      <label style="font-size:12px">Persona <select id="plantPara" class="input" style="width:auto">${opts.map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('')}</select></label>
+      <div id="plantBody" style="margin-top:12px"></div>
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--muted,#2a3545)">
+        <div style="font-weight:700;font-size:13px;margin-bottom:6px">➕ Nueva tarea recurrente para esta persona</div>
+        <input id="plantTexto" class="input" placeholder="Qué hay que hacer" style="width:100%;margin-bottom:6px">
+        <textarea id="plantDesc" class="input" placeholder="Detalle (opcional)" rows="2" style="width:100%;margin-bottom:6px"></textarea>
+        <div class="inline" style="gap:6px;flex-wrap:wrap;font-size:12px">
+          <select id="plantFrec" class="input" style="width:auto"><option value="diaria">Diaria (laborables)</option><option value="semanal">Semanal</option><option value="mensual">Mensual (1er laborable)</option><option value="aviso">Según aviso</option></select>
+          <select id="plantDia" class="input" style="width:auto;display:none">${DIAS_SEMANA.slice(1).map((d,i)=>`<option value="${i+1}">${d}</option>`).join('')}</select>
+          <select id="plantPri" class="input" style="width:auto"><option value="media">Prioridad media</option><option value="alta">Prioridad alta</option><option value="baja">Prioridad baja</option></select>
+          <input id="plantMomento" class="input" placeholder="Momento (p. ej. tarde)" style="width:150px">
+          <button class="btn" id="plantGuardarBtn" style="background:var(--accent,#2e75b6);color:#fff">Guardar</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e=>{ if(e.target === modal) modal.remove(); });
+  $('#plantCerrarBtn').onclick = ()=>modal.remove();
+  $('#plantPara').value = _plantPara;
+  $('#plantPara').onchange = e=>{ _plantPara = e.target.value; renderPlantillasModal(); };
+  $('#plantFrec').onchange = e=>{ $('#plantDia').style.display = e.target.value === 'semanal' ? '' : 'none'; };
+  $('#plantGenerarBtn').onclick = async ()=>{
+    const b = $('#plantGenerarBtn'); b.disabled = true; b.textContent = '⏳ Generando...';
+    try{ const r = await generarRecurrentesAhora(); alert(`✅ ${r.creadas.length} tarea(s) creadas hoy${r.creadas.length ? ':\n• ' + r.creadas.join('\n• ') : ''}${r.caducadas ? `\n${r.caducadas} diaria(s) sin hacer marcadas como no hechas.` : ''}`); }
+    catch(e){ alert('No se pudieron generar: ' + (e.message || e)); }
+    finally{ b.disabled = false; b.textContent = '🔄 Generar las de hoy'; }
+  };
+  $('#plantGuardarBtn').onclick = guardarPlantillaNueva;
+  renderPlantillasModal();
+}
+async function guardarPlantillaNueva(){
+  const texto = $('#plantTexto').value.trim(); if(!texto){ alert('Escribe qué hay que hacer.'); return; }
+  const para = _plantPara, frecuencia = $('#plantFrec').value;
+  const responsable = para.startsWith('area:') ? null : para;
+  const datos = {
+    texto, descripcion:$('#plantDesc').value.trim(), responsable,
+    area: para.startsWith('area:') ? para.slice(5) : (SGA_USUARIOS[para]?.area || 'oficina'),
+    frecuencia, diaSemana: frecuencia === 'semanal' ? Number($('#plantDia').value) : null,
+    momento:$('#plantMomento').value.trim() || null, prioridad:$('#plantPri').value, activa:true,
+    creadaAt:new Date().toISOString(), creadoPor:nombreUsuario(currentEmail),
+  };
+  const ref = doc(plantillasCol());
+  try{
+    await setDoc(ref, datos);
+    ['#plantTexto','#plantDesc','#plantMomento'].forEach(s=>{ $(s).value = ''; });
+    if(frecuencia !== 'aviso') generarRecurrentesAhora(ref.id).catch(e=>console.warn('[Plantillas] generar hoy:', e?.message || e));
+  }catch(e){ alert('No se pudo guardar: ' + (e.message || e)); }
+}
+function renderPlantillasModal(){
+  const body = $('#plantBody'); if(!body) return;
+  const para = _plantPara, esPersona = !para.startsWith('area:');
+  const items = esPersona ? (_rutinas[para] || []) : [];
+  const plants = _plantillas.filter(p=> esPersona ? p.responsable === para : (!p.responsable && p.area === para.slice(5)))
+    .sort((a,b)=>(b.activa?1:0)-(a.activa?1:0) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
+  const pri = p => p.prioridad === 'alta' ? '🔴 alta' : p.prioridad === 'baja' ? '⚪ baja' : 'media';
+  body.innerHTML = (esPersona ? `
+    <div style="font-weight:700;font-size:13px;margin-bottom:6px">☀️ Rutina diaria</div>
+    ${items.length ? items.map(i=>`<div style="display:flex;gap:8px;align-items:center;padding:6px 8px;margin-bottom:4px;background:rgba(255,255,255,0.04);border-radius:6px">
+        <span style="flex:1;font-size:13px">${escapeHtml(i.texto)}${i.descripcion ? `<div style="font-size:11px;color:var(--text-muted)">${escapeHtml(i.descripcion)}</div>` : ''}</span>
+        <button class="btn rutQuitar" data-id="${escapeHtml(i.id)}" style="padding:2px 8px;font-size:12px;color:var(--danger,#e53)">✕</button></div>`).join('')
+      : '<div class="small" style="color:var(--text-muted);margin-bottom:4px">Sin rutina todavía.</div>'}
+    <div class="inline" style="gap:6px;margin:6px 0 14px"><input id="rutNuevo" class="input" placeholder="Añadir punto a la rutina..." style="flex:1"><button class="btn" id="rutAnadirBtn">Añadir</button></div>` : '') + `
+    <div style="font-weight:700;font-size:13px;margin-bottom:6px">🔁 Tareas recurrentes del tablón</div>
+    ${plants.length ? plants.map(p=>`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 8px;margin-bottom:4px;background:rgba(255,255,255,0.04);border-radius:6px;${p.activa ? '' : 'opacity:0.5'}">
+        <span style="flex:1;min-width:200px;font-size:13px">${escapeHtml(p.texto)}
+          <div style="font-size:11px;color:var(--text-muted)">${escapeHtml(textoFrecuencia(p))} · ${pri(p)}${p.momento ? ' · por la ' + escapeHtml(p.momento.replace(/^por la /i,'')) : ''}${p.activa ? '' : (p.pasadaARutinaAt ? ' · pasada a rutina' : ' · pausada')}${p.descripcion ? '<br>' + escapeHtml(p.descripcion) : ''}</div></span>
+        <button class="btn plLanzar" data-id="${escapeHtml(p.id)}" style="padding:2px 8px;font-size:12px" title="Crear ahora la tarea en el tablón">▶ Lanzar</button>
+        ${esPersona && p.activa ? `<button class="btn plRutina" data-id="${escapeHtml(p.id)}" style="padding:2px 8px;font-size:12px">➡️ Rutina</button>` : ''}
+        <button class="btn plActiva" data-id="${escapeHtml(p.id)}" style="padding:2px 8px;font-size:12px">${p.activa ? '⏸ Pausar' : '▶ Activar'}</button>
+        <button class="btn plEditar" data-id="${escapeHtml(p.id)}" style="padding:2px 8px;font-size:12px">✏️</button>
+        <button class="btn plBorrar" data-id="${escapeHtml(p.id)}" style="padding:2px 8px;font-size:12px;color:var(--danger,#e53)">✕</button></div>`).join('')
+      : '<div class="small" style="color:var(--text-muted)">Sin tareas recurrentes.</div>'}`;
+  body.querySelectorAll('.rutQuitar').forEach(b=>b.onclick = async ()=>{
+    const i = items.find(x=>x.id===b.dataset.id);
+    if(!confirm(`¿Quitar «${i?.texto}» de la rutina de ${nombreUsuario(para)}?`)) return;
+    try{ await rutinaCambiarItems(para, its=>its.filter(x=>x.id!==b.dataset.id)); }catch(e){ alert('No se pudo quitar: ' + (e.message || e)); }
+  });
+  const anadir = async ()=>{
+    const texto = $('#rutNuevo')?.value.trim(); if(!texto) return;
+    try{ await rutinaCambiarItems(para, its=>[...its, { id:`r${Date.now().toString(36)}`, texto, descripcion:'' }]); }catch(e){ alert('No se pudo añadir: ' + (e.message || e)); }
+  };
+  $('#rutAnadirBtn') && ($('#rutAnadirBtn').onclick = anadir);
+  $('#rutNuevo')?.addEventListener('keydown', e=>{ if(e.key === 'Enter') anadir(); });
+  body.querySelectorAll('.plLanzar').forEach(b=>b.onclick = ()=>lanzarPlantillaSga(b.dataset.id));
+  body.querySelectorAll('.plRutina').forEach(b=>b.onclick = ()=>pasarPlantillaARutina(b.dataset.id));
+  body.querySelectorAll('.plActiva').forEach(b=>b.onclick = async ()=>{
+    const p = _plantillas.find(x=>x.id===b.dataset.id); if(!p) return;
+    try{ await updateDoc(doc(plantillasCol(), p.id), { activa:!p.activa }); }catch(e){ alert('No se pudo cambiar: ' + (e.message || e)); }
+  });
+  body.querySelectorAll('.plEditar').forEach(b=>b.onclick = async ()=>{
+    const p = _plantillas.find(x=>x.id===b.dataset.id); if(!p) return;
+    const texto = prompt('Qué hay que hacer:', p.texto || ''); if(texto === null || !texto.trim()) return;
+    const descripcion = prompt('Detalle (opcional):', p.descripcion || ''); if(descripcion === null) return;
+    const prioridad = (prompt('Prioridad (alta, media o baja):', p.prioridad || 'media') || '').trim().toLowerCase();
+    try{ await updateDoc(doc(plantillasCol(), p.id), { texto:texto.trim(), descripcion:descripcion.trim(), prioridad:['alta','media','baja'].includes(prioridad) ? prioridad : (p.prioridad || 'media') }); }
+    catch(e){ alert('No se pudo guardar: ' + (e.message || e)); }
+  });
+  body.querySelectorAll('.plBorrar').forEach(b=>b.onclick = async ()=>{
+    const p = _plantillas.find(x=>x.id===b.dataset.id); if(!p) return;
+    if(!confirm(`¿Borrar la plantilla «${p.texto}»?\n\nDeja de generarse; las tareas que ya estén en el tablón se quedan.`)) return;
+    try{ await deleteDoc(doc(plantillasCol(), p.id)); }catch(e){ alert('No se pudo borrar: ' + (e.message || e)); }
+  });
 }
 
 // Importación única de las tareas pendientes de la versión anterior (un documento por día con toda la lista). Por cada texto se mira su
