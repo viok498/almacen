@@ -498,6 +498,7 @@ textarea{resize:vertical}
               <th>Validado</th>
               <th>Disponible</th>
               <th title="Resta también lo reservado en pedidos pendientes sin recoger — si sale en negativo, hay más unidades pedidas de las que hay en stock">Disp. neta</th>
+              <th title="Próxima importación en camino (verde = confirmada, ámbar = estimada)">Próx. llegada</th>
               <th></th>
             </tr>
           </thead>
@@ -4975,13 +4976,20 @@ function llegadasPendientes(ean){
 function fmtFechaLlegada(f){ const [y,m,d] = String(f||'').split('-'); return `${d}/${m}/${y}`; }
 function textoLlegada(l){ return `${fmtFechaLlegada(l.fecha)} · ${l.uds} uds · ${l.pedido} · ${l.estado}`; }
 function colorLlegada(l){ return l.estado === 'Confirmada' ? '#27ae60' : '#f39c12'; }
-function llegadaBadgeHtml(ean){
+// Celda compacta de la columna "Próx. llegada": la fecha en una píldora de color (verde =
+// confirmada, ámbar = estimada) y debajo uds · pedido en pequeño. Las llegadas posteriores van
+// en un "+N" desplegable; al pasar el ratón se ven todas.
+function llegadaCeldaHtml(ean){
   const lista = llegadasPendientes(ean); if(!lista.length) return '';
   const [prox, ...resto] = lista;
-  const chip = `<span class="badge" style="background:${colorLlegada(prox)};color:#fff;cursor:${resto.length?'pointer':'default'}" title="${escapeHtml(lista.map(textoLlegada).join('\n') + (prox.nota ? '\n' + prox.nota : ''))}">🚢 Llega ${escapeHtml(textoLlegada(prox))}${resto.length ? ` · +${resto.length}` : ''}</span>`;
-  if(!resto.length) return ' ' + chip;
-  return ` <details style="display:inline-block;vertical-align:middle"><summary style="list-style:none;display:inline">${chip}</summary>` +
-    `<div style="margin-top:4px;font-size:11px;display:flex;flex-direction:column;gap:2px">${resto.map(l=>`<span style="color:${colorLlegada(l)}">• ${escapeHtml(textoLlegada(l))}</span>`).join('')}</div></details>`;
+  const title = escapeHtml(lista.map(textoLlegada).join('\n') + (prox.nota ? '\n' + prox.nota : ''));
+  const linea = l => `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:${colorLlegada(l)};color:#fff;font-size:11px;font-weight:600">${fmtFechaLlegada(l.fecha)}</span>` +
+    `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${l.uds} uds · ${escapeHtml(l.pedido)}</div>`;
+  const mas = resto.length
+    ? `<details style="margin-top:2px"><summary style="cursor:pointer;font-size:10px;color:var(--text-muted)">+${resto.length} más</summary>` +
+      resto.map(l=>`<div style="margin-top:4px">${linea(l)}</div>`).join('') + `</details>`
+    : '';
+  return `<div title="${title}">${linea(prox)}${mas}</div>`;
 }
 function llegadasListaHtml(ean){
   const lista = llegadasPendientes(ean); if(!lista.length) return '';
@@ -5042,8 +5050,8 @@ function renderInventoryTable(){
       ? `<strong style="color:var(--danger,#e53935)">${r.netDisponible}</strong>`
       : `<span style="color:var(--text-muted)">${r.netDisponible}</span>`;
     const soloCompBadge = esSoloComponente(r.ean) ? ` <span class="badge" style="background:rgba(46,117,182,0.2);color:var(--accent,#2e75b6)" title="Se publica siempre a 0 en WooCommerce, Amazon y Mirakl aunque tenga stock — solo se vende dentro de kits">🧩 Solo componente</span>` : '';
-    const espBadges = especialBadgesHtml(r.ean) + llegadaBadgeHtml(r.ean);
-    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
+    const espBadges = especialBadgesHtml(r.ean);
+    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td style="white-space:nowrap">${llegadaCeldaHtml(r.ean)}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
     // Listeners de los botones editar / borrar
     tr.querySelector('.edit-stock-btn').addEventListener('click', ()=>openEditStockModal(r.ean));
     tr.querySelector('.mover-especial-btn').addEventListener('click', ()=>abrirModalMoverEspecial(r.ean));
