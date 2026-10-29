@@ -483,6 +483,8 @@ textarea{resize:vertical}
         <input type="file" id="importarTarifasDistFile" accept=".xlsx,.xls" style="display:none">
         <button id="verOutletBtn" class="btn invVistaBtn" data-vista="outlet" style="background:#e67e22;color:#fff">🔶 Outlet</button>
         <button id="verFaltanBtn" class="btn invVistaBtn" data-vista="faltanPiezas" style="background:#c0392b;color:#fff">🔧 Faltan piezas</button>
+        <label class="small" style="display:flex;align-items:center;gap:4px;white-space:nowrap" title="Solo artículos con una importación en camino, ordenados por fecha de llegada"><input type="checkbox" id="filtroLlegadas"> 🚢 Con llegada pendiente</label>
+        <button id="actualizarLlegadasBtn" class="btn" title="Volver a leer ahora la hoja de importaciones">🔄 Actualizar llegadas</button>
       </div>
 
       <div id="inventarioNormalWrap" class="table-wrap" style="flex:1;min-height:0">
@@ -498,6 +500,7 @@ textarea{resize:vertical}
               <th>Validado</th>
               <th>Disponible</th>
               <th title="Resta también lo reservado en pedidos pendientes sin recoger — si sale en negativo, hay más unidades pedidas de las que hay en stock">Disp. neta</th>
+              <th title="Próxima importación en camino (verde = confirmada, ámbar = estimada)">Próx. llegada</th>
               <th></th>
             </tr>
           </thead>
@@ -1974,6 +1977,8 @@ function defaultState(){
     mapeoAgencias: {},
     // Inventarios especiales (Firestore, ver subscribeAll): [{id, ean, name, qty, nota, foto, origen, refOrigen, fecha}]
     especial: { outlet: [], faltanPiezas: [] },
+    // Llegadas de importación (meta/llegadas): { porEan: { ean: [{fecha, uds, pedido, estado, nota}] }, actualizadoISO, ultimoError }
+    llegadas: { porEan: {}, actualizadoISO: null, ultimoError: null },
     devoluciones: [],
     listas: [],
     tareas: {},
@@ -2411,7 +2416,7 @@ function subscribeAll(){
 
   unsubscribers.push(onSnapshot(collection(db, 'warehouses', WAREHOUSE_ID, 'orders'), snap=>{
     if(isPicking){ ordersLoaded = true; markLoaded(); return; }
-    state.orders = snap.docs.map(d=>({ id:d.id, ...(d.data()||{}) }));
+    state.orders = snap.docs.map(d=>marcarKitsEnPedido({ id:d.id, ...(d.data()||{}) }));
     state.orders.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     ordersLoaded = true;
     markLoaded();
@@ -2453,6 +2458,15 @@ function subscribeAll(){
       renderEspecialSiVisible(); renderInventoryTable();
     }, err=>console.warn(`[${tipo}] no se pudo sincronizar (no afecta al resto del SGA):`, err?.message||err)));
   }
+
+  // Llegadas de importación (28/10/2026): las deja la Cloud Function llegadas.js en meta/llegadas.
+  // Opcional: si falla, el SGA sigue igual y se queda con lo último que había cargado.
+  unsubscribers.push(onSnapshot(doc(db, 'warehouses', WAREHOUSE_ID, 'meta', 'llegadas'), snap=>{
+    if(!snap.exists()) return;
+    const d = snap.data() || {};
+    state.llegadas = { porEan: d.porEan || state.llegadas?.porEan || {}, actualizadoISO: d.actualizadoISO || null, ultimoError: d.ultimoError || null };
+    pintarEstadoLlegadas(); renderInventoryTable();
+  }, err=>console.warn('[llegadas] no se pudo sincronizar (no afecta al resto del SGA):', err?.message||err)));
 }
 
 function markLoaded(){
@@ -4986,6 +5000,64 @@ function esSoloComponente(ean){
   const d = String(ean == null ? '' : ean).replace(/\D/g, '');
   return PUBLICAR_SIEMPRE_CERO.has(d.replace(/^0+/, '') || d);
 }
+// ── Llegadas de importación (28/10/2026, Víctor) ──
+// Datos: meta/llegadas, que rellena la Cloud Function llegadas.js desde la hoja de
+// importaciones (la clave de la hoja no está en el navegador). Se cruza por EAN como TEXTO
+// exacto, sin quitar ceros. "Próxima" = primera fecha igual o posterior a hoy.
+const URL_LLEGADAS_AHORA = 'https://llegadasactualizarahora-dfqyhilaha-uc.a.run.app';
+function llegadasPendientes(ean){
+  const hoy = fechaLocalYMD();
+  return (state.llegadas?.porEan?.[String(ean == null ? '' : ean).trim()] || []).filter(l=>l.fecha >= hoy);
+}
+function fmtFechaLlegada(f){ const [y,m,d] = String(f||'').split('-'); return `${d}/${m}/${y}`; }
+function textoLlegada(l){ return `${fmtFechaLlegada(l.fecha)} · ${l.uds} uds · ${l.pedido} · ${l.estado}`; }
+function colorLlegada(l){ return l.estado === 'Confirmada' ? '#27ae60' : '#f39c12'; }
+// Celda compacta de la columna "Próx. llegada": la fecha en una píldora de color (verde =
+// confirmada, ámbar = estimada) y debajo uds · pedido en pequeño. Las llegadas posteriores van
+// en un "+N" desplegable; al pasar el ratón se ven todas.
+function llegadaCeldaHtml(ean){
+  const lista = llegadasPendientes(ean); if(!lista.length) return '';
+  const [prox, ...resto] = lista;
+  const title = escapeHtml(lista.map(textoLlegada).join('\n') + (prox.nota ? '\n' + prox.nota : ''));
+  const linea = l => `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:${colorLlegada(l)};color:#fff;font-size:11px;font-weight:600">${fmtFechaLlegada(l.fecha)}</span>` +
+    `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${l.uds} uds · ${escapeHtml(l.pedido)}</div>`;
+  const mas = resto.length
+    ? `<details style="margin-top:2px"><summary style="cursor:pointer;font-size:10px;color:var(--text-muted)">+${resto.length} más</summary>` +
+      resto.map(l=>`<div style="margin-top:4px">${linea(l)}</div>`).join('') + `</details>`
+    : '';
+  return `<div title="${title}">${linea(prox)}${mas}</div>`;
+}
+function llegadasListaHtml(ean){
+  const lista = llegadasPendientes(ean); if(!lista.length) return '';
+  return `<div style="font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;background:rgba(255,255,255,0.05)">
+    <div style="font-weight:600;margin-bottom:4px">🚢 Próximas llegadas</div>
+    ${lista.map(l=>`<div style="color:${colorLlegada(l)}">• ${escapeHtml(textoLlegada(l))}${l.nota ? ` <span style="color:var(--text-muted)">(${escapeHtml(l.nota)})</span>` : ''}</div>`).join('')}
+  </div>`;
+}
+function pintarEstadoLlegadas(){
+  const b = $('#actualizarLlegadasBtn'); if(!b || b.disabled) return;
+  const ll = state.llegadas || {};
+  const cuando = ll.actualizadoISO ? new Date(ll.actualizadoISO).toLocaleString('es-ES', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : 'nunca';
+  b.textContent = ll.ultimoError ? '⚠️ Actualizar llegadas' : '🔄 Actualizar llegadas';
+  b.title = `Llegadas leídas por última vez: ${cuando}` + (ll.ultimoError ? `\n⚠️ Último intento fallido (${new Date(ll.ultimoError.at).toLocaleString('es-ES')}): ${ll.ultimoError.mensaje}. Se siguen mostrando los últimos datos buenos.` : '');
+}
+async function actualizarLlegadasAhora(){
+  const b = $('#actualizarLlegadasBtn');
+  try{
+    if(!auth?.currentUser) throw new Error('No hay sesión iniciada.');
+    if(b){ b.disabled = true; b.textContent = '⏳ Leyendo llegadas...'; }
+    const resp = await fetch(URL_LLEGADAS_AHORA, { method:'POST', headers:{ Authorization:`Bearer ${await auth.currentUser.getIdToken()}` } });
+    const r = await resp.json().catch(()=>({ ok:false, error:`respuesta ${resp.status}` }));
+    if(!r.ok) throw new Error(r.error || `respuesta ${resp.status}`);
+    alert(`✅ Llegadas actualizadas: ${r.filas} líneas de ${r.eans} artículos.`);
+  }catch(err){
+    alert('No se pudieron actualizar las llegadas (se mantienen los últimos datos): ' + (err?.message || err));
+  }finally{
+    if(b) b.disabled = false;
+    pintarEstadoLlegadas();
+  }
+}
+
 function renderInventoryTable(){
   const q = ($('#inventorySearch')?.value || '').trim().toLowerCase(); const tbody = $('#inventoryTableBody'); if(!tbody) return; tbody.innerHTML='';
   const eans = Array.from(new Set([...(state.inventory?.byEan ? Object.keys(state.inventory.byEan) : []), ...state.catalog.map(c=>c.EAN).filter(Boolean)]));
@@ -4996,7 +5068,10 @@ function renderInventoryTable(){
   // se quedó sin nombre por algún fallo (como el de validar/borrar pedidos corregido el
   // 30/09/2026) se puede localizar y arreglar buscándola directamente, en vez de quedar
   // invisible para siempre.
-  validEans.map(ean=>getInventoryRow(ean)).filter(r=>r.name||state.inventory.byEan?.[r.ean]?.refProveedor||(q && r.ean.toLowerCase()===q)).filter(r=>!q || r.ean.toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q) || (r.familia||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.proveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.refProveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.nombreIngles||'').toLowerCase().includes(q)).sort((a,b)=>(a.name||'').localeCompare(b.name||'')).forEach(r=>{
+  const soloLlegadas = !!$('#filtroLlegadas')?.checked;
+  validEans.map(ean=>getInventoryRow(ean)).filter(r=>!soloLlegadas || llegadasPendientes(r.ean).length).filter(r=>r.name||state.inventory.byEan?.[r.ean]?.refProveedor||(q && r.ean.toLowerCase()===q)).filter(r=>!q || r.ean.toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q) || (r.familia||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.proveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.refProveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.nombreIngles||'').toLowerCase().includes(q)).sort(soloLlegadas
+      ? (a,b)=>llegadasPendientes(a.ean)[0].fecha.localeCompare(llegadasPendientes(b.ean)[0].fecha) || (a.name||'').localeCompare(b.name||'')
+      : (a,b)=>(a.name||'').localeCompare(b.name||'')).forEach(r=>{
     const tr=document.createElement('tr');
     const inv = state.inventory.byEan?.[r.ean] || {};
     const provColor = inv.proveedor==='OKPRO' ? '#2980b9' : inv.proveedor==='DINGZHOU' ? '#27ae60' : inv.proveedor==='CSP' ? '#e67e22' : '#555';
@@ -5012,7 +5087,7 @@ function renderInventoryTable(){
       : `<span style="color:var(--text-muted)">${r.netDisponible}</span>`;
     const soloCompBadge = esSoloComponente(r.ean) ? ` <span class="badge" style="background:rgba(46,117,182,0.2);color:var(--accent,#2e75b6)" title="Se publica siempre a 0 en WooCommerce, Amazon y Mirakl aunque tenga stock — solo se vende dentro de kits">🧩 Solo componente</span>` : '';
     const espBadges = especialBadgesHtml(r.ean);
-    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
+    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td style="white-space:nowrap">${llegadaCeldaHtml(r.ean)}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
     // Listeners de los botones editar / borrar
     tr.querySelector('.edit-stock-btn').addEventListener('click', ()=>openEditStockModal(r.ean));
     tr.querySelector('.mover-especial-btn').addEventListener('click', ()=>abrirModalMoverEspecial(r.ean));
@@ -5032,6 +5107,7 @@ function openEditStockModal(ean){
     <div style="background:var(--panel,#1a2332);border-radius:10px;padding:20px;width:100%;max-width:360px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
       <div style="font-weight:700;font-size:15px;margin-bottom:4px">✏️ Editar stock</div>
       <div style="font-size:11px;color:var(--text-muted,#aaa);margin-bottom:10px">EAN: ${escapeHtml(ean)}</div>
+      ${llegadasListaHtml(ean)}
       ${!row.name?`<div style="font-size:11px;padding:6px 8px;background:rgba(229,57,53,0.12);border-radius:4px;margin-bottom:10px;border-left:3px solid var(--danger,#e53935)">⚠️ Esta ficha no tiene nombre guardado — ponle uno para que vuelva a aparecer en el listado normal.</div>`:''}
       <label style="font-size:12px;font-weight:600">Nombre</label>
       <input id="editStockNameInput" class="input" type="text" value="${escapeHtml(row.name||'')}" placeholder="Nombre del artículo" style="width:100%;margin:6px 0 14px 0">
@@ -6510,6 +6586,24 @@ async function initDefaultLabels(){
   if(dirty1){ await saveNaveRemote('NAVE-1'); console.log('[Init] Labels NAVE-1 inicializados'); }
   if(dirty2){ await saveNaveRemote('NAVE-2'); console.log('[Init] Labels NAVE-2 inicializados'); }
   if(dirty1 || dirty2) queueRenderAll();
+}
+
+// Los pedidos que crean las Cloud Functions (Woo, Mirakl, Amazon) llegan con el código del kit
+// en la línea pero SIN el flag esKit — expandKitLines solo corría al importar PDF/Excel. Sin el
+// flag, validar un pack (p. ej. "563") descontaba una ficha suelta "563" en vez de sus 20
+// losetas (28/10/2026, pedido Woo 47002). Se marca al cargar, salvo en pedidos ya cerrados o
+// líneas ya empezadas, que se validaron con la lógica anterior y no se deben reinterpretar.
+function marcarKitsEnPedido(order){
+  if(!Array.isArray(order.lines) || order.status === 'validated' || order.status === 'partial') return order;
+  let cambia = false;
+  const lines = order.lines.map(l=>{
+    if(l.esKit || l.esComponenteKit || Number(l.qtyPicked||0) > 0) return l;
+    const kit = KITS[String(l.ean).trim()];
+    if(!kit) return l;
+    cambia = true;
+    return { ...l, esKit:true, name: kit.nombre || l.name };
+  });
+  return cambia ? { ...order, lines } : order;
 }
 
 function expandKitLines(lines){
@@ -10832,6 +10926,8 @@ document.querySelectorAll('.subtabs button').forEach(btn=>btn.addEventListener('
   $('#especialImportFile')?.addEventListener('change', e=>{ const f = e.target.files[0]; e.target.value = ''; importarEspecialDesdeArchivo(f); });
   $('#especialExportBtn')?.addEventListener('click', exportarEspecial);
   $('#inventorySearch')?.addEventListener('input', renderEspecialSiVisible);
+  $('#filtroLlegadas')?.addEventListener('change', renderInventoryTable);
+  $('#actualizarLlegadasBtn')?.addEventListener('click', actualizarLlegadasAhora);
   $('#devolucionesFilter')?.addEventListener('change', renderDevoluciones);
   $('#historialSearch')?.addEventListener('input', renderHistorial);
   $('#historialFilter')?.addEventListener('change', renderHistorial);
