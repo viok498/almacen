@@ -2455,6 +2455,7 @@ function subscribeAll(){
   // no bloquea el arranque del SGA si falla — es solo para el panel de historial.
   unsubscribers.push(onSnapshot(collection(db, 'warehouses', WAREHOUSE_ID, 'entradasMercancia'), snap=>{
     state.entradasMercanciaRemote = snap.docs.map(d=>({ id:d.id, ...(d.data()||{}) }));
+    subirEntradasLocales();
     if($('#historialEntradasPanel') && !$('#historialEntradasPanel').classList.contains('hidden')){
       renderHistorialEntradas();
     }
@@ -10112,7 +10113,7 @@ function abrirModalIncidenciaPostventa(){
 // entre las dos (p.ej. "lineas" es un número en una y un array en la otra), de ahí este
 // adaptador en vez de fusionar los objetos tal cual.
 function normalizarEntradaMercancia(e, origen){
-  if(origen === 'local'){
+  if(origen === 'local' || e.origen === 'excel'){
     return {
       id: e.id,
       titulo: e.albaran || 'Sin nombre',
@@ -10121,7 +10122,7 @@ function normalizarEntradaMercancia(e, origen){
       unidadesTotales: e.unidadesTotales || 0,
       detalle: (e.lineas_detalle||[]).map(l=>({ean:l.ean, nombre:l.nombre, cantidad:l.cantidad})),
       sinCodigo: [],
-      origenLabel: '📥 Excel manual',
+      origenLabel: '📥 Excel manual' + (e.registradoPor ? ` (${nombreUsuario(e.registradoPor)})` : ''),
       pedidoImportacion: e.pedidoImportacion || null
     };
   }
@@ -10231,6 +10232,30 @@ async function registrarRecepcionImp(pedido, completa, entrada){
     tx.set(ref, datos, { merge:true });
   });
 }
+// Entradas por Excel en Firestore (30/10/2026): misma colección que las del watcher, con
+// origen:'excel'. Antes vivían solo en el navegador donde se hacían (localStorage).
+async function guardarEntradaExcelRemota(entrada){
+  await setDoc(doc(db, 'warehouses', WAREHOUSE_ID, 'entradasMercancia', entrada.id),
+    { ...entrada, origen:'excel', registradoPor: entrada.registradoPor || currentEmail || null, procesadoAt: serverTimestamp() }, { merge:true });
+}
+// Sube una vez las entradas que quedaron en el navegador (las de antes de este cambio o las que
+// no se pudieron guardar) y las quita de local cuando ya están en Firebase.
+let _migrandoEntradas = false;
+async function subirEntradasLocales(){
+  if(_migrandoEntradas || !db || !(state.entradasMercancia || []).length) return;
+  _migrandoEntradas = true;
+  try{
+    const pendientes = [...state.entradasMercancia];
+    for(const e of pendientes){
+      await guardarEntradaExcelRemota({ ...e, registradoPor: e.registradoPor || null, subidaDesdeLocalPor: currentEmail || null });
+      state.entradasMercancia = state.entradasMercancia.filter(x=>x.id !== e.id);
+    }
+    saveCache();
+    console.log(`[Entradas] ${pendientes.length} entrada(s) de este navegador subidas a Firebase.`);
+  }catch(err){ console.warn('[Entradas] no se pudieron subir las entradas locales:', err?.message || err); }
+  finally{ _migrandoEntradas = false; }
+}
+
 // Vincular a posteriori una entrada ya registrada (p. ej. las que sube solo el watcher de ClassicGes).
 async function vincularEntradaAPedido(entradaId){
   const local = (state.entradasMercancia || []).find(e=>e.id===entradaId);
@@ -10239,7 +10264,7 @@ async function vincularEntradaAPedido(entradaId){
   const r = await pedirPedidoImportacion({ titulo:'Pedido de importación de esta entrada', actual:e.pedidoImportacion || '' });
   if(!r || !r.pedido) return;
   try{
-    await registrarRecepcionImp(r.pedido, r.completa, { id:entradaId, origen: local ? 'Excel manual' : 'ClassicGes', uds:e.unidadesTotales });
+    await registrarRecepcionImp(r.pedido, r.completa, { id:entradaId, origen: (local || e.origen === 'excel') ? 'Excel manual' : 'ClassicGes', uds:e.unidadesTotales });
     if(local){ local.pedidoImportacion = r.pedido; saveCache(); renderHistorialEntradas(); }
     else await updateDoc(doc(db, 'warehouses', WAREHOUSE_ID, 'entradasMercancia', entradaId), { pedidoImportacion:r.pedido });
   }catch(err){ alert('No se pudo vincular: ' + (err?.message || err)); }
@@ -10297,8 +10322,14 @@ async function onEntradaMercanciaFileChange(e){
       operario: state.ui?.operario||'1',
       pedidoImportacion: imp.pedido || null
     };
-    if(!state.entradasMercancia) state.entradasMercancia=[];
-    state.entradasMercancia.push(entrada);
+    // Historial en Firestore (30/10/2026): visible desde cualquier puesto, junto a las del watcher.
+    // Si no se puede guardar, se queda en este navegador y se sube en el próximo arranque.
+    try{ await guardarEntradaExcelRemota(entrada); }
+    catch(err){
+      console.warn('[Entradas] no se pudo guardar en Firebase, queda en local:', err?.message || err);
+      if(!state.entradasMercancia) state.entradasMercancia=[];
+      state.entradasMercancia.push(entrada);
+    }
     saveCache(); renderInventoryTable(); updateStats();
     if(imp.pedido){
       try{ await registrarRecepcionImp(imp.pedido, imp.completa, { id:entrada.id, origen:'Excel manual', uds:udsTotal }); }
