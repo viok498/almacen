@@ -479,6 +479,7 @@ textarea{resize:vertical}
         <button class="btn" id="scanInventorySearchBtn" title="Escanear EAN" style="padding:6px 10px">📷</button>
         <button id="nuevoArticuloBtn" class="btn" style="background:var(--accent,#2e75b6);color:#fff" title="Dar de alta un artículo suelto sin importar todo el catálogo">➕ Nuevo artículo</button>
         <button id="exportInventoryBtn" class="btn">Exportar inventario</button>
+        <button id="exportDriveBtn" class="btn" title="Sube ya a Google Drive inventario_sga.csv y salidas_sga.csv (se hace solo cada día a las 07:30)">☁️ Exportar a Drive</button>
         <button id="informeDistBtn" class="btn" title="Excel para distribuidores: tarifa + disponibilidad (sin cantidades) + enlace web">📊 Informe distribuidores</button>
         <button id="importarTarifasDistBtn" class="btn" title="Cargar la tarifa de distribuidor (Precio 4) desde el listado de tarifas de ClassicGes">💶 Cargar tarifas</button>
         <input type="file" id="importarTarifasDistFile" accept=".xlsx,.xls" style="display:none">
@@ -2482,6 +2483,13 @@ function subscribeAll(){
     state.llegadas = { porEan: d.porEan || state.llegadas?.porEan || {}, actualizadoISO: d.actualizadoISO || null, ultimoError: d.ultimoError || null };
     pintarEstadoLlegadas(); renderInventoryTable();
   }, err=>console.warn('[llegadas] no se pudo sincronizar (no afecta al resto del SGA):', err?.message||err)));
+  // Recepciones de pedidos de importación (30/10/2026): un pedido marcado como recibido completo
+  // deja de salir en las llegadas (ver llegadasPendientes).
+  unsubscribers.push(onSnapshot(collection(db, 'warehouses', WAREHOUSE_ID, 'recepcionesImportacion'), snap=>{
+    state.recepcionesImp = {}; snap.forEach(d=>{ state.recepcionesImp[d.id] = d.data(); });
+    renderInventoryTable();
+    if($('#historialEntradasPanel') && !$('#historialEntradasPanel').classList.contains('hidden')) renderHistorialEntradas();
+  }, err=>console.warn('[recepcionesImportacion] no se pudo sincronizar:', err?.message||err)));
 }
 
 function markLoaded(){
@@ -5018,15 +5026,39 @@ function esSoloComponente(ean){
 // ── Llegadas de importación (28/10/2026, Víctor) ──
 // Datos: meta/llegadas, que rellena la Cloud Function llegadas.js desde la hoja de
 // importaciones (la clave de la hoja no está en el navegador). Se cruza por EAN como TEXTO
-// exacto, sin quitar ceros. "Próxima" = primera fecha igual o posterior a hoy.
+// exacto, sin quitar ceros.
+// Visibilidad (30/10/2026, Víctor): ninguna línea se oculta por fecha. Si la fecha ya pasó y su
+// pedido no tiene la recepción completa registrada, sale como "pendiente de entrada". Las líneas
+// de un PEDIDO desaparecen cuando se marca su recepción como completa al dar la entrada de
+// mercancía (recepcionesImportacion/{pedido}, campo "Pedido de importación" de la entrada).
 const URL_LLEGADAS_AHORA = 'https://llegadasactualizarahora-dfqyhilaha-uc.a.run.app';
+function idPedidoImp(pedido){ return String(pedido || '').trim().replace(/\//g, '_'); }
+function recepcionImp(pedido){ return state.recepcionesImp?.[idPedidoImp(pedido)] || null; }
 function llegadasPendientes(ean){
-  const hoy = fechaLocalYMD();
-  return (state.llegadas?.porEan?.[String(ean == null ? '' : ean).trim()] || []).filter(l=>l.fecha >= hoy);
+  return (state.llegadas?.porEan?.[String(ean == null ? '' : ean).trim()] || []).filter(l=>!recepcionImp(l.pedido)?.completa);
+}
+function llegadaPendienteEntrada(l){ return l.fecha < fechaLocalYMD(); }
+// Pedidos del CSV que aún no se han recibido completos (para el desplegable de la entrada).
+function pedidosImportacionAbiertos(){
+  const m = new Map();
+  for(const lineas of Object.values(state.llegadas?.porEan || {})){
+    for(const l of lineas){
+      const p = String(l.pedido || '').trim(); if(!p || recepcionImp(p)?.completa) continue;
+      const x = m.get(p) || { pedido:p, fecha:l.fecha, articulos:0, uds:0 };
+      x.articulos++; x.uds += Number(l.uds || 0); if(l.fecha < x.fecha) x.fecha = l.fecha;
+      m.set(p, x);
+    }
+  }
+  return [...m.values()].sort((a,b)=>a.fecha.localeCompare(b.fecha));
 }
 function fmtFechaLlegada(f){ const [y,m,d] = String(f||'').split('-'); return `${d}/${m}/${y}`; }
-function textoLlegada(l){ return `${fmtFechaLlegada(l.fecha)} · ${l.uds} uds · ${l.pedido} · ${l.estado}`; }
-function colorLlegada(l){ return l.estado === 'Confirmada' ? '#27ae60' : '#f39c12'; }
+function textoLlegada(l){
+  const parcial = recepcionImp(l.pedido) ? ' · recepción parcial registrada' : '';
+  return llegadaPendienteEntrada(l)
+    ? `En tránsito a almacén / pendiente de entrada (llegada prevista ${fmtFechaLlegada(l.fecha)}) · ${l.uds} uds · ${l.pedido}${parcial}`
+    : `${fmtFechaLlegada(l.fecha)} · ${l.uds} uds · ${l.pedido} · ${l.estado}${parcial}`;
+}
+function colorLlegada(l){ return llegadaPendienteEntrada(l) ? '#8e44ad' : l.estado === 'Confirmada' ? '#27ae60' : '#f39c12'; }
 // Celda compacta de la columna "Próx. llegada": la fecha en una píldora de color (verde =
 // confirmada, ámbar = estimada) y debajo uds · pedido en pequeño. Las llegadas posteriores van
 // en un "+N" desplegable; al pasar el ratón se ven todas.
@@ -5034,8 +5066,8 @@ function llegadaCeldaHtml(ean){
   const lista = llegadasPendientes(ean); if(!lista.length) return '';
   const [prox, ...resto] = lista;
   const title = escapeHtml(lista.map(textoLlegada).join('\n') + (prox.nota ? '\n' + prox.nota : ''));
-  const linea = l => `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:${colorLlegada(l)};color:#fff;font-size:11px;font-weight:600">${fmtFechaLlegada(l.fecha)}</span>` +
-    `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${l.uds} uds · ${escapeHtml(l.pedido)}</div>`;
+  const linea = l => `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:${colorLlegada(l)};color:#fff;font-size:11px;font-weight:600">${llegadaPendienteEntrada(l) ? '📦 Pendiente de entrada' : fmtFechaLlegada(l.fecha)}</span>` +
+    `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${llegadaPendienteEntrada(l) ? `prev. ${fmtFechaLlegada(l.fecha)} · ` : ''}${l.uds} uds · ${escapeHtml(l.pedido)}${recepcionImp(l.pedido) ? ' · parcial' : ''}</div>`;
   const mas = resto.length
     ? `<details style="margin-top:2px"><summary style="cursor:pointer;font-size:10px;color:var(--text-muted)">+${resto.length} más</summary>` +
       resto.map(l=>`<div style="margin-top:4px">${linea(l)}</div>`).join('') + `</details>`
@@ -10089,7 +10121,8 @@ function normalizarEntradaMercancia(e, origen){
       unidadesTotales: e.unidadesTotales || 0,
       detalle: (e.lineas_detalle||[]).map(l=>({ean:l.ean, nombre:l.nombre, cantidad:l.cantidad})),
       sinCodigo: [],
-      origenLabel: '📥 Excel manual'
+      origenLabel: '📥 Excel manual',
+      pedidoImportacion: e.pedidoImportacion || null
     };
   }
   const fechaDoc = e.procesadoAt?.toDate ? e.procesadoAt.toDate().toISOString() : '';
@@ -10101,7 +10134,8 @@ function normalizarEntradaMercancia(e, origen){
     unidadesTotales: e.unidadesTotales || 0,
     detalle: e.lineas||[],
     sinCodigo: e.lineasSinCodigo||[],
-    origenLabel: '🏭 ClassicGes automático'
+    origenLabel: '🏭 ClassicGes automático',
+    pedidoImportacion: e.pedidoImportacion || null
   };
 }
 
@@ -10125,11 +10159,16 @@ function renderHistorialEntradas(){
         <div>
           <div style="font-weight:600;font-size:13px">${e.origenLabel} ${escapeHtml(e.titulo)}</div>
           <div style="font-size:11px;color:var(--text-muted)">${(e.fecha||'').substring(0,16).replace('T',' ')} · ${e.lineasCount} líneas · ${e.unidadesTotales} uds. totales${e.sinCodigo.length?` · ⚠️ ${e.sinCodigo.length} sin código`:''}</div>
+          ${e.pedidoImportacion ? `<div style="font-size:11px;color:#8e44ad;font-weight:600">🚢 ${escapeHtml(e.pedidoImportacion)}${recepcionImp(e.pedidoImportacion)?.completa ? ' · recepción completa' : ' · recepción parcial'}</div>` : ''}
         </div>
-        <button class="btn verDetalleEntradaBtn" data-id="${escapeHtml(e.id)}" style="font-size:11px;padding:3px 8px">Ver detalle</button>
+        <div style="display:flex;gap:4px">
+          <button class="btn vincularEntradaBtn" data-id="${escapeHtml(e.id)}" style="font-size:11px;padding:3px 8px" title="Indicar de qué pedido de importación es esta entrada">🚢 ${e.pedidoImportacion ? 'Cambiar' : 'Pedido'}</button>
+          <button class="btn verDetalleEntradaBtn" data-id="${escapeHtml(e.id)}" style="font-size:11px;padding:3px 8px">Ver detalle</button>
+        </div>
       </div>
     </div>`).join('');
 
+  list.querySelectorAll('.vincularEntradaBtn').forEach(btn=>btn.addEventListener('click', ()=>vincularEntradaAPedido(btn.dataset.id)));
   list.querySelectorAll('.verDetalleEntradaBtn').forEach(btn=>{
     btn.addEventListener('click',()=>{
       const entrada = entradas.find(e=>e.id===btn.dataset.id);
@@ -10141,6 +10180,69 @@ function renderHistorialEntradas(){
       alert('Entrada: '+entrada.titulo+'\n'+(entrada.fecha||'').substring(0,16).replace('T',' ')+'\n\n'+detalle+sinCodigoTxt);
     });
   });
+}
+
+// ── Pedido de importación de una entrada (30/10/2026, Víctor) ──
+// Al dar una entrada de mercancía se elige de qué PEDIDO de importación es (los del CSV de
+// llegadas) y si con ella el pedido queda recibido COMPLETO: entonces sus líneas dejan de salir en
+// "Próx. llegada". Varias entradas parciales se acumulan hasta que una se marca como completa.
+// Devuelve { pedido, completa } (pedido '' = ninguno) o null si se cancela.
+function pedirPedidoImportacion({ titulo = 'Entrada de mercancía', actual = '', cancelarTxt = 'Cancelar' } = {}){
+  return new Promise(resolve=>{
+    document.getElementById('pedidoImpModal')?.remove();
+    const abiertos = pedidosImportacionAbiertos();
+    if(actual && !abiertos.some(p=>p.pedido===actual)) abiertos.unshift({ pedido:actual, fecha:'', articulos:0, uds:0 });
+    const modal = document.createElement('div');
+    modal.id = 'pedidoImpModal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:20px';
+    modal.innerHTML = `
+      <div style="background:var(--panel,#1a2332);border-radius:10px;padding:20px;width:100%;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
+        <div style="font-weight:700;font-size:15px;margin-bottom:10px">🚢 ${escapeHtml(titulo)}</div>
+        <label style="font-size:12px;font-weight:600">Pedido de importación</label>
+        <select id="pimpSelect" class="input" style="width:100%;margin:4px 0 10px">
+          <option value="">— Ninguno (no es de un pedido de importación) —</option>
+          ${abiertos.map(p=>`<option value="${escapeHtml(p.pedido)}">${escapeHtml(p.pedido)}${p.fecha ? ` · llegada ${fmtFechaLlegada(p.fecha)}` : ''}${p.articulos ? ` · ${p.articulos} art. / ${p.uds} uds` : ''}${recepcionImp(p.pedido) ? ' · ya hay parcial' : ''}</option>`).join('')}
+        </select>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:14px"><input type="checkbox" id="pimpCompleta" checked> Recepción completa (el pedido deja de salir en llegadas)</label>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" id="pimpCancelar">${escapeHtml(cancelarTxt)}</button>
+          <button class="btn" id="pimpOk" style="background:var(--accent,#2e75b6);color:#fff">Continuar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const sel = modal.querySelector('#pimpSelect'), chk = modal.querySelector('#pimpCompleta');
+    sel.value = actual || '';
+    const fin = v=>{ modal.remove(); resolve(v); };
+    modal.querySelector('#pimpCancelar').onclick = ()=>fin(null);
+    modal.querySelector('#pimpOk').onclick = ()=>fin({ pedido:sel.value, completa:!!sel.value && chk.checked });
+  });
+}
+async function registrarRecepcionImp(pedido, completa, entrada){
+  if(!pedido) return;
+  const ref = doc(db, 'warehouses', WAREHOUSE_ID, 'recepcionesImportacion', idPedidoImp(pedido));
+  const ahora = new Date().toISOString();
+  await runTransaction(db, async tx=>{
+    const s = await tx.get(ref);
+    const prev = s.exists() ? s.data() : {};
+    const entradas = Array.isArray(prev.entradas) ? prev.entradas.filter(e=>e.entradaId !== entrada.id) : [];
+    entradas.push({ entradaId:entrada.id, origen:entrada.origen || '', uds:Number(entrada.uds || 0), at:ahora, por:currentEmail || null, completa:!!completa });
+    const datos = { pedido, entradas, actualizadaAt:ahora };
+    if(completa && !prev.completa) Object.assign(datos, { completa:true, completaAt:ahora, completaPor:currentEmail || null, completaPorNombre:nombreUsuario(currentEmail) });
+    tx.set(ref, datos, { merge:true });
+  });
+}
+// Vincular a posteriori una entrada ya registrada (p. ej. las que sube solo el watcher de ClassicGes).
+async function vincularEntradaAPedido(entradaId){
+  const local = (state.entradasMercancia || []).find(e=>e.id===entradaId);
+  const remota = (state.entradasMercanciaRemote || []).find(e=>e.id===entradaId);
+  const e = local || remota; if(!e) return;
+  const r = await pedirPedidoImportacion({ titulo:'Pedido de importación de esta entrada', actual:e.pedidoImportacion || '' });
+  if(!r || !r.pedido) return;
+  try{
+    await registrarRecepcionImp(r.pedido, r.completa, { id:entradaId, origen: local ? 'Excel manual' : 'ClassicGes', uds:e.unidadesTotales });
+    if(local){ local.pedidoImportacion = r.pedido; saveCache(); renderHistorialEntradas(); }
+    else await updateDoc(doc(db, 'warehouses', WAREHOUSE_ID, 'entradasMercancia', entradaId), { pedidoImportacion:r.pedido });
+  }catch(err){ alert('No se pudo vincular: ' + (err?.message || err)); }
 }
 
 async function onEntradaMercanciaFileChange(e){
@@ -10162,6 +10264,9 @@ async function onEntradaMercanciaFileChange(e){
     const colName = findCol('ARTÍCULO','articulo','nombre','name','description');
 
     if(!colEan||!colQty){ info.textContent = '❌ No se encontraron columnas EAN y CANTIDAD.'; return; }
+
+    const imp = await pedirPedidoImportacion({ titulo:`Entrada de mercancía: ${file.name}`, cancelarTxt:'Cancelar entrada' });
+    if(!imp){ info.textContent = 'Entrada cancelada: no se ha sumado nada al stock.'; return; }
 
     let count=0, udsTotal=0;
     const lineas_detalle = [];
@@ -10189,11 +10294,16 @@ async function onEntradaMercanciaFileChange(e){
       lineas: count,
       unidadesTotales: udsTotal,
       lineas_detalle,
-      operario: state.ui?.operario||'1'
+      operario: state.ui?.operario||'1',
+      pedidoImportacion: imp.pedido || null
     };
     if(!state.entradasMercancia) state.entradasMercancia=[];
     state.entradasMercancia.push(entrada);
     saveCache(); renderInventoryTable(); updateStats();
+    if(imp.pedido){
+      try{ await registrarRecepcionImp(imp.pedido, imp.completa, { id:entrada.id, origen:'Excel manual', uds:udsTotal }); }
+      catch(err){ alert(`La entrada se ha registrado, pero no se pudo vincular al pedido ${imp.pedido}: ${err?.message || err}\nVincúlala desde «📋 Historial entradas».`); }
+    }
     if($('#historialEntradasPanel') && !$('#historialEntradasPanel').classList.contains('hidden')){
       renderHistorialEntradas();
     }
@@ -11378,6 +11488,19 @@ $('#clearOrderSearchManualBtn')?.addEventListener('click', ()=>{
   $('#exportInventoryBtn')?.addEventListener('click', ()=>{
     const rows = Array.from(new Set([...(state.inventory?.byEan ? Object.keys(state.inventory.byEan) : []), ...state.catalog.map(c=>c.EAN).filter(Boolean)])).map(ean=>{ const r=getInventoryRow(ean); return { EAN:r.ean, NOMBRE:r.name||'', STOCK_BASE:r.stockBase, RESERVADO:r.reserved, VALIDADO:r.stockValidated, DISPONIBLE:r.available }; });
     downloadBlob(new Blob([toCsv(rows)], {type:'text/csv;charset=utf-8'}), 'inventario_operativo.csv');
+  });
+  // Exportación a Drive para las alertas de rotura (30/10/2026): la hace la Cloud Function
+  // exportDriveAhora (la clave de Google vive allí, no en el navegador). Cada día a las 07:30 se hace sola.
+  $('#exportDriveBtn')?.addEventListener('click', async ()=>{
+    const b = $('#exportDriveBtn');
+    b.disabled = true; b.textContent = '⏳ Exportando...';
+    try{
+      const resp = await fetch('https://exportdriveahora-dfqyhilaha-uc.a.run.app', { method:'POST', headers:{ Authorization:`Bearer ${await auth.currentUser.getIdToken()}` } });
+      const r = await resp.json().catch(()=>({}));
+      if(!r.ok) throw new Error(r.error || `respuesta ${resp.status}`);
+      alert('✅ Exportado a Drive:\n' + r.ficheros.map(f=>`• ${f.filename}: ${f.filas} filas`).join('\n'));
+    }catch(err){ alert('❌ No se pudo exportar a Drive: ' + (err?.message || err)); }
+    finally{ b.disabled = false; b.textContent = '☁️ Exportar a Drive'; }
   });
   $('#informeDistBtn')?.addEventListener('click', generarInformeDistribuidores);
   $('#importarTarifasDistBtn')?.addEventListener('click', ()=> $('#importarTarifasDistFile')?.click());
