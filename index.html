@@ -5251,6 +5251,7 @@ function entradasMapeoDePedido(orderId){
 // cualquier agencia vinculada a este pedido — es decir, ya se le ha pasado el envío.
 function pedidoTieneSeguimiento(orderId){
   const target = String(orderId||'').trim();
+  if(target && pedidoPorId(target)?.envio?.seguimiento) return true; // envío registrado por Cowork (enviosApi)
   if(!target || !state.mapeoAgencias) return false;
   return entradasMapeoDePedido(target).length > 0;
 }
@@ -5288,6 +5289,10 @@ function pedidoPorId(orderId){
 function agenciaBadge(orderId){
   const _o = pedidoPorId(orderId);
   if(esRepartoPropio(_o)) return `<span class="badge" style="background:#d35400;color:#fff" title="Este pedido lo entrega VIOK con su propio reparto — no necesita agencia">${textoRepartoPropio(_o)}</span>`;
+  if(_o?.envio?.seguimiento){
+    const e = _o.envio;
+    return `<span class="badge ok" title="Envío creado por ${escapeHtml(e.fuente||'Cowork')}${e.bultos ? ` · ${e.bultos} bulto(s)` : ''}${e.kg ? ` · ${e.kg} kg` : ''} · nº ${escapeHtml(e.seguimiento)}">🚚 ${escapeHtml(e.agencia||'Con agencia')}</span>`;
+  }
   return pedidoTieneSeguimiento(orderId)
     ? '<span class="badge ok" title="Ya se ha cargado la relación de la agencia con este pedido">🚚 Con agencia</span>'
     : '<span class="badge warn" title="Aún no se ha cargado la relación de ninguna agencia con este pedido">⏳ Sin agencia</span>';
@@ -7355,6 +7360,8 @@ async function desvincularPedidoAAgencia(numExp, orderId){
 // vinculó a mano con "🔗 Vincular envío" (escaneo suelto, sin manifiesto), no hay agencia
 // conocida y se cuenta como "Sin identificar" en los informes.
 function agenciaRealDePedido(orderId){
+  const envio = pedidoPorId(orderId)?.envio;
+  if(envio?.agencia && envio?.seguimiento) return envio.agencia; // registrado por Cowork
   if(!state.mapeoAgencias) return null;
   const hit = entradasMapeoDePedido(orderId)[0];
   return hit ? (hit.entry.agencia || null) : null;
