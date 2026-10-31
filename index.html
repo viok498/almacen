@@ -602,7 +602,7 @@ textarea{resize:vertical}
         <button class="btn ghost" id="miraklCheckNowBtn" style="white-space:nowrap" title="Consulta Decathlon/Worten/Sprinter/Leroy Merlin ahora mismo, sin esperar a los 10 minutos">🔄 Comprobar Mirakl ahora</button>
         <button class="btn ghost" id="wooCheckNowBtn" style="white-space:nowrap" title="Consulta WooCommerce ahora mismo (pedidos nuevos y cancelaciones), sin esperar al repaso automático — útil justo antes de generar el lote de envío a agencias">🔄 Comprobar WooCommerce ahora</button>
         <button class="btn ghost" id="amazonCheckNowBtn" style="white-space:nowrap" title="Consulta Amazon ahora mismo, sin esperar a los 10 minutos">🔄 Comprobar Amazon ahora</button>
-        <button class="btn ghost" id="exportAgenciasBtn" style="white-space:nowrap;background:var(--ok,#4caf50);color:#fff" title="Exporta los pedidos que aún no tienen agencia asignada (⏳ Sin agencia), con dirección y contacto, para clasificar por agencia de transporte">📤 Exportar pendientes (agencias)</button>
+        <button class="btn ghost" id="exportAgenciasBtn" style="white-space:nowrap;background:var(--ok,#4caf50);color:#fff" title="XLSX de los pedidos pendientes de enviar (sin agencia, sin Amazon ni reparto propio), con dirección y contacto, para generar los envíos (formato del export de Mirakl)">📤 Exportar envíos (XLSX)</button>
         <button class="btn ghost" id="exportCorreccionesBtn" style="white-space:nowrap" title="Exporta el registro de correcciones manuales a la previsión de agencia, para revisarlo y afinar las reglas">📊 Exportar correcciones agencia</button>
         <button class="btn ghost" id="rescatarPedidoBtn" style="white-space:nowrap" title="Trae de vuelta un pedido de WooCommerce que se borró del SGA por cambiar de estado antes de pasar por picking (p.ej. marcado 'Enviado' sin prepararse aquí)">🛟 Rescatar pedido Woo</button>
         <button class="btn ghost" id="buscarPorEanBtn" style="white-space:nowrap" title="Dado el EAN de un artículo, muestra en qué pedidos aparece — útil si llega un artículo suelto o sin etiquetar y hay que saber de qué pedido salió">🔍 ¿De qué pedido es este EAN?</button>
@@ -5259,7 +5259,22 @@ function pedidoTieneSeguimiento(orderId){
 // Un pedido así NO cuenta como "sin agencia" pendiente, no sale en "Exportar pendientes (agencias)"
 // y no se ofrece como candidato al vincular una etiqueta de envío.
 const AGENCIA_REPARTO_PROPIO = 'REPARTO_PROPIO';
-function esRepartoPropio(order){ return !!order && order.agenciaPrevistaManual === AGENCIA_REPARTO_PROPIO; }
+// 31/10/2026 (Víctor): "Montaje" = lo llevamos nosotros porque vamos a montarlo; cuenta como
+// reparto propio. Y todo lo que va a YECLA va siempre con transporte propio, sin marcar nada
+// (salvo que se elija a mano otra agencia en el selector, que manda).
+const AGENCIA_MONTAJE = 'MONTAJE';
+function esDestinoYecla(order){ return !!order && (String(order.codigoPostal||'').trim() === '30510' || /\byecla\b/i.test(String(order.ciudad||''))); }
+function esRepartoPropio(order){
+  if(!order) return false;
+  const m = order.agenciaPrevistaManual;
+  if(m === AGENCIA_REPARTO_PROPIO || m === AGENCIA_MONTAJE) return true;
+  return !m && esDestinoYecla(order);
+}
+function textoRepartoPropio(order){
+  if(order?.agenciaPrevistaManual === AGENCIA_MONTAJE) return '🔧 Montaje (lo llevamos)';
+  if(!order?.agenciaPrevistaManual && esDestinoYecla(order)) return '🚐 Reparto propio (Yecla)';
+  return '🚐 Reparto propio';
+}
 let _ordIdx = null, _ordIdxSrc = null, _ordIdxLen = -1;
 function pedidoPorId(orderId){
   const arr = state.orders||[];
@@ -5272,7 +5287,7 @@ function pedidoPorId(orderId){
 }
 function agenciaBadge(orderId){
   const _o = pedidoPorId(orderId);
-  if(esRepartoPropio(_o)) return '<span class="badge" style="background:#d35400;color:#fff" title="Este pedido lo entrega VIOK con su propio reparto — no necesita agencia">🚐 Reparto propio</span>';
+  if(esRepartoPropio(_o)) return `<span class="badge" style="background:#d35400;color:#fff" title="Este pedido lo entrega VIOK con su propio reparto — no necesita agencia">${textoRepartoPropio(_o)}</span>`;
   return pedidoTieneSeguimiento(orderId)
     ? '<span class="badge ok" title="Ya se ha cargado la relación de la agencia con este pedido">🚚 Con agencia</span>'
     : '<span class="badge warn" title="Aún no se ha cargado la relación de ninguna agencia con este pedido">⏳ Sin agencia</span>';
@@ -5388,6 +5403,7 @@ function previsionAgenciaInfo(order){
   if(order.agenciaPrevistaManual){
     return { agencia: order.agenciaPrevistaManual, motivo: 'Corregida a mano', manual: true };
   }
+  if(esDestinoYecla(order)) return { agencia: AGENCIA_REPARTO_PROPIO, motivo: 'Yecla: siempre transporte propio' };
   // Clave: lo que de verdad afecta al resultado (líneas, cantidades, destino).
   const clave = `${order.id}|${order.codigoPostal||''}|${order.pais||''}|${(order.lines||[]).map(l=>l.ean+':'+l.qty).join(',')}`;
   const cacheado = _previsionCache.get(order.id);
@@ -5512,7 +5528,7 @@ async function corregirAgenciaPrevista(orderId, nuevaAgencia){
   saveCache(); renderOrders(); renderOrderDetail(orderId);
   await saveOrderRemote(order);
 
-  const esCorreccionReal = nuevaAgencia && nuevaAgencia !== AGENCIA_REPARTO_PROPIO && previa?.agencia && previa.agencia !== nuevaAgencia && !previa.manual;
+  const esCorreccionReal = nuevaAgencia && nuevaAgencia !== AGENCIA_REPARTO_PROPIO && nuevaAgencia !== AGENCIA_MONTAJE && previa?.agencia !== AGENCIA_REPARTO_PROPIO && previa?.agencia && previa.agencia !== nuevaAgencia && !previa.manual;
   if(esCorreccionReal){
     try{
       await setDoc(doc(collection(db, 'warehouses', WAREHOUSE_ID, 'correccionesAgencia')), {
@@ -6114,7 +6130,7 @@ function renderOrderDetail(orderId){
     const tieneSeguimiento = pedidoTieneSeguimiento(order.id);
     let infoTexto;
     if(esRepartoPropio(order)){
-      infoTexto = '<span class="small" style="color:var(--text-muted)">Lo entrega VIOK con su propio reparto — no va a agencia</span>';
+      infoTexto = `<span class="small" style="color:var(--text-muted)">${textoRepartoPropio(order)} — lo entrega VIOK, no va a agencia${!order.agenciaPrevistaManual ? ' (automático por ser Yecla)' : ''}</span>`;
     } else if(tieneSeguimiento){
       const real = agenciaRealDePedido(order.id);
       infoTexto = real
@@ -6127,8 +6143,9 @@ function renderOrderDetail(orderId){
       <span class="small" style="font-weight:600">Previsión de agencia:</span>
       ${infoTexto}
       <select id="previsionAgenciaSelect" class="input" style="width:auto">
-        ${opt('','Automático')}${opt('ONTIME','ONTIME')}${opt('TXT','TXT')}${opt('TRANSHAER','TRANSHAER')}${opt('CAMPILLO','CAMPILLO')}${opt(AGENCIA_REPARTO_PROPIO,'🚐 REPARTO PROPIO')}
+        ${opt('','Automático')}${opt('ONTIME','ONTIME')}${opt('TXT','TXT')}${opt('TRANSHAER','TRANSHAER')}${opt('CAMPILLO','CAMPILLO')}${opt(AGENCIA_REPARTO_PROPIO,'🚐 REPARTO PROPIO')}${opt(AGENCIA_MONTAJE,'🔧 MONTAJE (lo llevamos)')}
       </select>
+      <button class="btn" id="direccionEnvioBtn" style="font-size:12px" title="Ver o completar la dirección de entrega (necesaria para el export de envíos)">📍 Dirección${tieneDireccionEnvio(order) ? '' : ' ⚠️'}</button>
     </div>`;
   })();
   box.innerHTML = `<div class="inline" style="justify-content:space-between"><div><strong>Pedido ${escapeHtml(order.id)}</strong><div class="small">${escapeHtml(order.channel||'-')} · ${escapeHtml(order.customer||'-')}</div><div class="small">📅 Subido: ${fmtDateTime(order.createdAt)}</div></div><div class="inline" style="gap:4px">${statusBadge(order.status)}${['validated','shipped'].includes(order.status) ? '' : agenciaBadge(order.id)}${mismoClienteBadge(order)}${cambioAgenciaBadge(order)}</div></div>${losetaWarningHtml}${previsionHtml}${seguimientoAvisoHtml}<div class="inline" style="margin-top:8px"><button class="btn" id="setPickingBtn">Marcar en picking</button><button class="btn" id="validateOrderBtn">Validar pedido</button><button class="btn" id="reserveOrderBtn" style="background:#2980b9;color:#fff">📦 Reservar</button><button class="btn" id="incidentOrderBtn">Marcar incidencia</button>${holdResumeBtn}${revertBtn}<button class="btn" id="scanOrderBtn">📷 Escanear línea</button><button class="btn" id="addLineBtn" title="Añade una línea nueva a este pedido (p.ej. una que faltaba por determinar en el albarán)">➕ Añadir línea</button><button class="btn" id="vincularAgenciaBtn" style="background:#8e44ad;color:#fff" title="Escanea la etiqueta de envío de este pedido concreto para vincularlo a su agencia, sin esperar a subir el manifiesto completo">🔗 Vincular envío</button>${deshacerVinculacionBtn}<button class="btn" id="deleteOrderBtn" style="background:#c0392b;color:#fff;margin-left:auto">🗑 Borrar pedido</button></div><div style="margin-top:10px">${linesHtml}</div><div class="section"><div class="panel-title">Notas / incidencia</div><div class="inline" style="gap:6px;align-items:flex-start"><textarea id="orderNotes" class="input" style="flex:1;min-height:80px">${escapeHtml(order.notes||'')}</textarea><button id="voiceNoteBtn" class="btn" title="Dictar nota por voz" style="padding:8px 10px;font-size:18px">🎤</button></div></div>`;
@@ -6147,6 +6164,7 @@ function renderOrderDetail(orderId){
   $('#previsionAgenciaSelect')?.addEventListener('change', e=>{
     corregirAgenciaPrevista(order.id, e.target.value);
   });
+  $('#direccionEnvioBtn')?.addEventListener('click', ()=>editarDireccionEnvio(order.id));
   $('#incidentOrderBtn').addEventListener('click', async ()=>{ order.status='incident'; saveCache(); renderOrders(); await saveOrderRemote(order); });
   $('#holdOrderBtn')?.addEventListener('click', async ()=>{
     const motivo = prompt('¿Por qué se pone en espera? (opcional, se guarda en las notas del pedido)\nEj: "Esperando llegada de proveedor" / "Pendiente de transferencia"', '');
@@ -7083,49 +7101,131 @@ async function exportarCorreccionesAgencia(){
   URL.revokeObjectURL(url);
 }
 
+// \u2500\u2500 Export de env\u00EDos para Cowork (31/10/2026, V\u00EDctor) \u2500\u2500
+// XLSX con las cabeceras del export de Mirakl, que generar_agencias_v16.py ya sabe leer: una fila
+// por l\u00EDnea de pedido pendiente de enviar. Quedan fuera: Amazon (sin direcci\u00F3n hasta que Amazon
+// apruebe el rol de env\u00EDo directo; sigue por el TXT de Seller Central), los de reparto propio
+// (incluido Yecla y "Montaje"), los que ya tienen env\u00EDo/seguimiento y los que no tienen direcci\u00F3n
+// (se avisa en pantalla de cu\u00E1les son, para completarla con "\uD83D\uDCCD Direcci\u00F3n" en el pedido).
+// Hueco para la vuelta: order.envio = { agencia, bultos, kg, seguimiento, estado, fuente,
+// actualizadoAt } \u2014 un pedido con envio.seguimiento ya no se vuelve a exportar.
+const CABECERAS_ENVIO = ['Fecha de creaci\u00F3n','N\u00FAmero de pedido','Cantidad','Detalles','EAN',
+  'Direcci\u00F3n de entrega: nombre de pila','Direcci\u00F3n de entrega: apellido','Direcci\u00F3n de entrega: empresa',
+  'Direcci\u00F3n de entrega: calle 1','Direcci\u00F3n de entrega: calle 2','Direcci\u00F3n de entrega: c\u00F3digo postal',
+  'Direcci\u00F3n de entrega: ciudad','Direcci\u00F3n de entrega: provincia','Direcci\u00F3n de entrega: pa\u00EDs',
+  'Direcci\u00F3n de entrega: tel\u00E9fono','Direcci\u00F3n de entrega: correo electr\u00F3nico','Canal'];
+const PAISES_ISO2 = { ES:'ES', ESP:'ES', 'ESPA\u00D1A':'ES', 'ESPANA':'ES', SPAIN:'ES', PT:'PT', PRT:'PT', PORTUGAL:'PT',
+  FR:'FR', FRA:'FR', FRANCIA:'FR', FRANCE:'FR', IT:'IT', ITA:'IT', ITALIA:'IT', ITALY:'IT', DE:'DE', DEU:'DE', ALEMANIA:'DE', GERMANY:'DE', AD:'AD', AND:'AD', ANDORRA:'AD' };
+function paisIso2(o){
+  for(const v of [o.paisIso, o.pais]){
+    const k = String(v||'').trim().toUpperCase(); if(!k) continue;
+    if(PAISES_ISO2[k]) return PAISES_ISO2[k];
+    if(/^[A-Z]{2}$/.test(k)) return k;
+  }
+  return /^\d{4,5}$/.test(String(o.codigoPostal||'').trim()) ? 'ES' : '';
+}
+function cpEnvio(o){
+  const cp = String(o.codigoPostal||'').trim();
+  return paisIso2(o) === 'ES' && /^\d{1,5}$/.test(cp) ? cp.padStart(5,'0') : cp;
+}
+function canalEnvio(o){
+  const c = String(o.channel||'').toLowerCase();
+  for(const k of ['decathlon','leroy','worten','sprinter','amazon']) if(c.includes(k)) return k;
+  if(c.includes('woo') || c === 'web') return 'woocommerce';
+  if(c.includes('classic')) return 'classicges';
+  return c.replace(/\s+/g,'') || 'otro';
+}
+function eanEnvio(ean){
+  const e = String(ean||'').trim();
+  if(!e || e.startsWith('CLIENTE-')) return '';
+  return /^\d+$/.test(e) && e.length < 13 ? e.padStart(13,'0') : e;
+}
+function tieneDireccionEnvio(o){ return !!(String(o.direccion||'').trim() && String(o.codigoPostal||'').trim() && String(o.ciudad||'').trim()); }
+function nombreApellidoEnvio(o){
+  if(o.nombreEnvio !== undefined || o.apellidoEnvio !== undefined) return [o.nombreEnvio||'', o.apellidoEnvio||''];
+  return [o.customer||'', '']; // pedidos de antes del 31/10: solo hay el nombre completo
+}
+function fechaEnvio(iso){
+  const d = new Date(iso); if(isNaN(d)) return '';
+  const p = n=>String(n).padStart(2,'0');
+  return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function pedidosPendientesDeEnvio(){
+  return (state.orders||[]).filter(o =>
+    !['validated','shipped','partial','on_hold'].includes(o.status) && !pedidoTieneSeguimiento(o.id) && !o.envio?.seguimiento &&
+    !esRepartoPropio(o) && canalEnvio(o) !== 'amazon');
+}
 function exportarPedidosParaAgencias(){
-  const pedidos = (state.orders||[]).filter(o => !['validated','shipped'].includes(o.status) && !pedidoTieneSeguimiento(o.id) && !esRepartoPropio(o));
-
-  if(!pedidos.length){ alert('No hay pedidos pendientes de asignar agencia para exportar.'); return; }
-
-  const filas = [];
-  filas.push([
-    'Pedido','Canal','Cliente','NIF',
-    'Direccion','CodigoPostal','Ciudad','Provincia','Pais','Telefono','Email',
-    'EAN','Articulo','Cantidad'
-  ].join(';'));
-
+  const pendientes = pedidosPendientesDeEnvio();
+  const sinDireccion = pendientes.filter(o=>!tieneDireccionEnvio(o));
+  const pedidos = pendientes.filter(tieneDireccionEnvio);
+  if(!pedidos.length){
+    alert('No hay pedidos con direcci\u00F3n pendientes de enviar.' + (sinDireccion.length ? `\n\nSin direcci\u00F3n (compl\u00E9tala con \u00AB\uD83D\uDCCD Direcci\u00F3n\u00BB en el pedido):\n${sinDireccion.map(o=>`\u2022 ${o.id} \u00B7 ${o.channel||''} \u00B7 ${o.customer||''}`).join('\n')}` : ''));
+    return;
+  }
+  const filas = [CABECERAS_ENVIO];
   for(const o of pedidos){
+    const [nombre, apellido] = nombreApellidoEnvio(o);
     for(const l of (o.lines||[])){
       if(l.esKit && isLegacyExpandedKit(o,l)) continue; // legacy: saltar cabecera, sus componentes van aparte
       const qty = Number(l.qty||0);
       if(qty <= 0) continue;
-      filas.push([
-        o.id||'',
-        o.channel||'',
-        o.customer||'',
-        o.nif||'',
-        (o.direccion||'').replace(/;/g,','),
-        o.codigoPostal||'',
-        o.ciudad||'',
-        o.provincia||'',
-        o.pais||'',
-        o.telefono||'',
-        o.email||'',
-        l.ean||'',
-        (l.name||'').replace(/;/g,','),
-        qty
-      ].join(';'));
+      filas.push([fechaEnvio(o.createdAt), String(o.id||''), qty, l.name||'', eanEnvio(l.ean),
+        nombre, apellido, o.empresa||'', o.direccion||'', o.direccion2||'', cpEnvio(o),
+        o.ciudad||'', o.provincia||'', paisIso2(o), String(o.telefono||''), o.email||'', canalEnvio(o)]);
     }
   }
+  const ws = XLSX.utils.aoa_to_sheet(filas);
+  // EAN, CP y tel\u00E9fono como TEXTO para que no se pierdan los ceros a la izquierda.
+  const colsTexto = [1, 4, 10, 14];
+  for(let r = 1; r < filas.length; r++) for(const c of colsTexto){
+    const ref = XLSX.utils.encode_cell({ r, c }); if(ws[ref]){ ws[ref].t = 's'; ws[ref].v = String(ws[ref].v); ws[ref].z = '@'; }
+  }
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Pedidos');
+  const d = new Date(), p = n=>String(n).padStart(2,'0');
+  XLSX.writeFile(wb, `SGA_pedidos_envio_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.xlsx`);
+  if(sinDireccion.length){
+    alert(`\u2705 Exportados ${pedidos.length} pedido(s).\n\n\u26A0\uFE0F ${sinDireccion.length} pedido(s) se han quedado fuera por no tener direcci\u00F3n (compl\u00E9tala con \u00AB\uD83D\uDCCD Direcci\u00F3n\u00BB en el pedido):\n${sinDireccion.map(o=>`\u2022 ${o.id} \u00B7 ${o.channel||''} \u00B7 ${o.customer||''}`).join('\n')}`);
+  }
+}
 
-  const csv = filas.join('\n');
-  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'}); // BOM para que Excel abra bien los acentos
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const hoy = new Date().toISOString().substring(0,10);
-  a.href = url; a.download = `pedidos_pendientes_agencias_${hoy}.csv`; a.click();
-  URL.revokeObjectURL(url);
+// Direcci\u00F3n de entrega a mano (31/10/2026): sobre todo para los albaranes de ClassicGes, que no la
+// traen. Se guarda en los mismos campos que usan los pedidos de Woo y Mirakl.
+function editarDireccionEnvio(orderId){
+  const o = pedidoPorId(orderId); if(!o) return;
+  document.getElementById('direccionEnvioModal')?.remove();
+  const [nom, ape] = nombreApellidoEnvio(o);
+  const campos = [
+    ['nombreEnvio','Nombre', nom], ['apellidoEnvio','Apellidos', ape], ['empresa','Empresa', o.empresa||''],
+    ['direccion','Calle 1 *', o.direccion||''], ['direccion2','Calle 2', o.direccion2||''],
+    ['codigoPostal','C\u00F3digo postal *', o.codigoPostal||''], ['ciudad','Ciudad *', o.ciudad||''], ['provincia','Provincia', o.provincia||''],
+    ['paisIso','Pa\u00EDs (ES, PT\u2026)', paisIso2(o) || 'ES'], ['telefono','Tel\u00E9fono', o.telefono||''], ['email','Email', o.email||''],
+  ];
+  const modal = document.createElement('div');
+  modal.id = 'direccionEnvioModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.6);display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow:auto';
+  modal.innerHTML = `
+    <div style="background:var(--panel,#1a2332);border-radius:10px;padding:18px;width:100%;max-width:440px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:4px">\uD83D\uDCCD Direcci\u00F3n de entrega \u00B7 ${escapeHtml(o.id)}</div>
+      <div class="small" style="color:var(--text-muted);margin-bottom:10px">${escapeHtml(o.channel||'')} \u00B7 ${escapeHtml(o.customer||'')}</div>
+      ${campos.map(([k,label,v])=>`<label style="font-size:12px;font-weight:600">${label}</label><input class="input dirCampo" data-k="${k}" value="${escapeHtml(v)}" style="width:100%;margin:2px 0 8px">`).join('')}
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+        <button class="btn" id="dirCancelar">Cancelar</button>
+        <button class="btn" id="dirGuardar" style="background:var(--accent,#2e75b6);color:#fff">Guardar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#dirCancelar').onclick = ()=>modal.remove();
+  modal.querySelector('#dirGuardar').onclick = async ()=>{
+    const datos = {};
+    modal.querySelectorAll('.dirCampo').forEach(i=>{ datos[i.dataset.k] = i.value.trim(); });
+    if(!datos.direccion || !datos.codigoPostal || !datos.ciudad){ alert('Calle 1, c\u00F3digo postal y ciudad son obligatorios.'); return; }
+    datos.paisIso = datos.paisIso.toUpperCase(); datos.pais = datos.pais || datos.paisIso;
+    Object.assign(o, datos, { direccionManual:true });
+    modal.remove();
+    saveCache(); renderOrders(); renderOrderDetail(o.id);
+    try{ await saveOrderRemote(o); }catch(err){ alert('No se pudo guardar la direcci\u00F3n: ' + (err?.message || err)); }
+  };
 }
 
 // Igual que normalizeEAN pero para números de expedición de agencia: se queda solo con
@@ -7268,7 +7368,9 @@ function agenciaRealDePedido(orderId){
 // envío" sobre etiqueta suelta) que no llevan guardada la agencia — sin esto, esos
 // pedidos se quedarían encajados en "General" en la Ruta.
 function agenciaDelPedido(order){
+  if(order.agenciaPrevistaManual === AGENCIA_MONTAJE) return AGENCIA_REPARTO_PROPIO; // misma zona/pestaña que el reparto propio
   if(order.agenciaPrevistaManual) return order.agenciaPrevistaManual;
+  if(esDestinoYecla(order)) return AGENCIA_REPARTO_PROPIO;
   const real = agenciaRealDePedido(order.id);
   if(real) return real;
   const p = previsionAgenciaInfo(order);
