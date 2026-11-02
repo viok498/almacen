@@ -2595,6 +2595,19 @@ function handleSyncError(err){
   setSyncStatus('error', err?.message || 'Error Firestore');
 }
 
+// Redibujar solo lo que se ve (rendimiento, 02/11/2026): cada cambio en Firestore (un escaneo
+// en otro puesto, un pedido nuevo, Cowork...) redibujaba en TODOS los puestos el inventario, el
+// catálogo y la lista de pedidos completos, estuvieran a la vista o no. Ahora renderInventoryTable,
+// renderItems y renderOrders no hacen nada si su lista está oculta: la apuntan como pendiente y
+// se dibuja al mostrarla (navegarA / botón del catálogo -> renderPendientesVisibles).
+const _renderPendiente = new Set();
+function listaOculta(el){ return !el || el.offsetParent === null; }
+function renderPendientesVisibles(){
+  if(_renderPendiente.has('inventario') && !listaOculta($('#inventoryTableBody'))) renderInventoryTable();
+  if(_renderPendiente.has('catalogo') && !listaOculta($('#itemList'))) renderItems($('#search')?.value || '');
+  if(_renderPendiente.has('pedidos') && !listaOculta($('#ordersList'))) renderOrders();
+  if(_renderPendiente.has('mapa') && !listaOculta($('#grid'))) renderGrid();
+}
 function queueRenderAll(){
   if(renderQueued) return;
   renderQueued = true;
@@ -2611,7 +2624,23 @@ function queueRenderAll(){
 }
 
 function getNave(){ return state.naves[state.naveId]; }
-function itemByEAN(ean){ return state.catalog.find(x=>String(x.EAN)===String(ean)); }
+// Con índice (rendimiento, 02/11/2026): se llama cientos de veces en cada actualización de
+// Firestore (backfillNamesFromInventory, filas del inventario...) y antes recorría el catálogo
+// entero cada vez. El índice se rehace si cambia el array o su longitud; si un artículo cambiara
+// de EAN sin cambiar la longitud, la comprobación del acierto lo detecta y se busca a mano.
+let _catIdx = null, _catIdxSrc = null, _catIdxLen = -1;
+function itemByEAN(ean){
+  const arr = state.catalog || [];
+  if(!_catIdx || _catIdxSrc !== arr || _catIdxLen !== arr.length){
+    _catIdx = new Map();
+    for(const it of arr){ const k = String(it?.EAN); if(!_catIdx.has(k)) _catIdx.set(k, it); }
+    _catIdxSrc = arr; _catIdxLen = arr.length;
+  }
+  const k = String(ean);
+  const it = _catIdx.get(k);
+  if(it && String(it.EAN) === k) return it;
+  return it ? arr.find(x=>String(x.EAN)===k) : undefined;
+}
 
 // Busca un artículo de catálogo ya existente cuyo EAN sea el mismo una vez limpiado de
 // espacios/caracteres invisibles y ceros a la izquierda de más o de menos — para no crear
@@ -3254,6 +3283,7 @@ async function saveInventoryItemRemote(ean, origen){
 }
 
 async function saveOrderRemote(order){
+  invalidarReservas();
   if(!db || !order?.id) return;
   saveCacheSoon();
   setSyncStatus('syncing');
@@ -3408,6 +3438,8 @@ async function replaceAllFromState(imported){
 
 function renderItems(f=''){
   const list = $('#itemList');
+  if(listaOculta(list)){ _renderPendiente.add('catalogo'); return; }
+  _renderPendiente.delete('catalogo');
   const q = (f||'').trim().toLowerCase();
   const items = state.catalog.filter(it=>!q || (it.NOMBRE||'').toLowerCase().includes(q) || String(it.EAN).includes(q));
   list.innerHTML = items.map(it=>{
@@ -3442,6 +3474,8 @@ function renderItems(f=''){
 function renderGrid(){
   const n = getNave();
   const grid = $('#grid');
+  if(listaOculta(grid)){ _renderPendiente.add('mapa'); return; } // ver renderPendientesVisibles
+  _renderPendiente.delete('mapa');
   const _sel = state.ui.selectedCell; // guardar antes de redibujar
   grid.style.gridTemplateColumns = `repeat(${n.grid.cols}, 1fr)`;
   grid.innerHTML = '';
@@ -3832,22 +3866,31 @@ $('#backupNow').addEventListener('click', ()=>doBackup(false));
 function esPedidoResuelto(order){
   return order.status === 'validated' || order.status === 'partial';
 }
-function getReservedQty(ean){
-  let reserved = 0;
+// Índice de reservado/recogido por EAN (rendimiento, 02/11/2026): antes cada fila del
+// inventario/catálogo recorría TODOS los pedidos dos veces (600 artículos × miles de pedidos =
+// millones de vueltas en cada redibujado, varios segundos al cambiar de pestaña). Ahora se
+// calcula una vez y vale solo durante la tarea en curso (se descarta en el siguiente microtask)
+// o hasta que se guarda un pedido (invalidarReservas en saveOrderRemote), así que nunca queda
+// desfasado respecto a los pedidos en memoria.
+let _resIdx = null;
+function invalidarReservas(){ _resIdx = null; }
+function indiceReservas(){
+  if(_resIdx) return _resIdx;
+  const reservado = new Map(), recogido = new Map();
   for(const o of state.orders||[]){
     if(esPedidoResuelto(o)) continue;
-    for(const line of (o.lines||[])) if(line.ean===ean) reserved += Math.max(0, Number(line.qty||0) - Number(line.qtyPicked||0));
+    for(const line of (o.lines||[])){
+      const q = Number(line.qty||0), p = Number(line.qtyPicked||0);
+      reservado.set(line.ean, (reservado.get(line.ean)||0) + Math.max(0, q - p));
+      recogido.set(line.ean, (recogido.get(line.ean)||0) + p);
+    }
   }
-  return reserved;
+  _resIdx = { reservado, recogido };
+  queueMicrotask(invalidarReservas);
+  return _resIdx;
 }
-function getPickedQty(ean){
-  let picked = 0;
-  for(const o of state.orders||[]){
-    if(esPedidoResuelto(o)) continue;
-    for(const line of (o.lines||[])) if(line.ean===ean) picked += Number(line.qtyPicked||0);
-  }
-  return picked;
-}
+function getReservedQty(ean){ return indiceReservas().reservado.get(ean) || 0; }
+function getPickedQty(ean){ return indiceReservas().recogido.get(ean) || 0; }
 function getInventoryRow(ean){
   ensureInventoryLocal(ean);
   const row = state.inventory.byEan[ean];
@@ -5109,7 +5152,10 @@ async function actualizarLlegadasAhora(){
 }
 
 function renderInventoryTable(){
-  const q = ($('#inventorySearch')?.value || '').trim().toLowerCase(); const tbody = $('#inventoryTableBody'); if(!tbody) return; tbody.innerHTML='';
+  const tbody = $('#inventoryTableBody'); if(!tbody) return;
+  if(listaOculta(tbody)){ _renderPendiente.add('inventario'); return; }
+  _renderPendiente.delete('inventario');
+  const q = ($('#inventorySearch')?.value || '').trim().toLowerCase(); tbody.innerHTML='';
   const eans = Array.from(new Set([...(state.inventory?.byEan ? Object.keys(state.inventory.byEan) : []), ...state.catalog.map(c=>c.EAN).filter(Boolean)]));
   // Filtrar EANs inválidos (menos de 8 caracteres o que no sean numéricos/alfanuméricos reales)
   const validEans = eans.filter(ean => ean && ean.length >= 8 && /^[0-9A-Za-z\-]+$/.test(ean));
@@ -5119,10 +5165,10 @@ function renderInventoryTable(){
   // 30/09/2026) se puede localizar y arreglar buscándola directamente, en vez de quedar
   // invisible para siempre.
   const soloLlegadas = !!$('#filtroLlegadas')?.checked;
+  const filas = [];
   validEans.map(ean=>getInventoryRow(ean)).filter(r=>!soloLlegadas || llegadasPendientes(r.ean).length).filter(r=>r.name||state.inventory.byEan?.[r.ean]?.refProveedor||(q && r.ean.toLowerCase()===q)).filter(r=>!q || r.ean.toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q) || (r.familia||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.proveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.refProveedor||'').toLowerCase().includes(q) || (state.inventory.byEan?.[r.ean]?.nombreIngles||'').toLowerCase().includes(q)).sort(soloLlegadas
       ? (a,b)=>llegadasPendientes(a.ean)[0].fecha.localeCompare(llegadasPendientes(b.ean)[0].fecha) || (a.name||'').localeCompare(b.name||'')
       : (a,b)=>(a.name||'').localeCompare(b.name||'')).forEach(r=>{
-    const tr=document.createElement('tr');
     const inv = state.inventory.byEan?.[r.ean] || {};
     const provColor = inv.proveedor==='OKPRO' ? '#2980b9' : inv.proveedor==='DINGZHOU' ? '#27ae60' : inv.proveedor==='CSP' ? '#e67e22' : '#555';
     const provBadge = inv.proveedor ? `<span class="prov-badge" tabindex="0" style="background:${provColor};color:#fff">
@@ -5137,13 +5183,20 @@ function renderInventoryTable(){
       : `<span style="color:var(--text-muted)">${r.netDisponible}</span>`;
     const soloCompBadge = esSoloComponente(r.ean) ? ` <span class="badge" style="background:rgba(46,117,182,0.2);color:var(--accent,#2e75b6)" title="Se publica siempre a 0 en WooCommerce, Amazon y Mirakl aunque tenga stock — solo se vende dentro de kits">🧩 Solo componente</span>` : '';
     const espBadges = especialBadgesHtml(r.ean);
-    tr.innerHTML = `<td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td style="white-space:nowrap">${llegadaCeldaHtml(r.ean)}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td>`;
-    // Listeners de los botones editar / borrar
-    tr.querySelector('.edit-stock-btn').addEventListener('click', ()=>openEditStockModal(r.ean));
-    tr.querySelector('.mover-especial-btn').addEventListener('click', ()=>abrirModalMoverEspecial(r.ean));
-    tr.querySelector('.delete-stock-btn').addEventListener('click', ()=>borrarFichaInventario(r.ean));
-    tbody.appendChild(tr);
+    filas.push(`<tr><td>${escapeHtml(r.ean)}</td><td>${escapeHtml(r.name||'')}${soloCompBadge}${espBadges}${enlaceWeb(r.ean)}</td><td>${escapeHtml(r.familia||'')}</td><td>${provBadge}</td><td class="stock-base-cell" data-ean="${escapeHtml(r.ean)}">${r.stockBase}</td><td>${r.reserved}</td><td>${r.stockValidated}</td><td><strong>${r.available}</strong></td><td>${netCell}</td><td style="white-space:nowrap">${llegadaCeldaHtml(r.ean)}</td><td><button class="btn edit-stock-btn" data-ean="${escapeHtml(r.ean)}" style="padding:2px 8px;font-size:11px">✏️</button> <button class="btn mover-especial-btn" data-ean="${escapeHtml(r.ean)}" title="Pasar unidades a Outlet o a Faltan piezas" style="padding:2px 8px;font-size:11px">🔀</button> <button class="btn delete-stock-btn" data-ean="${escapeHtml(r.ean)}" title="Borrar ficha de inventario" style="padding:2px 8px;font-size:11px">🗑️</button></td></tr>`);
   });
+  // Rendimiento (02/11/2026): todas las filas de una vez (antes ~600 filas creadas y añadidas
+  // una a una, con 3 escuchadores cada una) y un único escuchador para los botones.
+  tbody.innerHTML = filas.join('');
+  if(!tbody.dataset.delegado){
+    tbody.dataset.delegado = '1';
+    tbody.addEventListener('click', e=>{
+      const b = e.target.closest('button[data-ean]'); if(!b || !tbody.contains(b)) return;
+      if(b.classList.contains('edit-stock-btn')) openEditStockModal(b.dataset.ean);
+      else if(b.classList.contains('mover-especial-btn')) abrirModalMoverEspecial(b.dataset.ean);
+      else if(b.classList.contains('delete-stock-btn')) borrarFichaInventario(b.dataset.ean);
+    });
+  }
 }
 
 function openEditStockModal(ean){
@@ -5611,6 +5664,8 @@ function resolverQueryPedido(qOriginal){
 
 function renderOrders(){
   const list = $('#ordersList'); if(!list) return;
+  if(listaOculta(list)){ _renderPendiente.add('pedidos'); return; }
+  _renderPendiente.delete('pedidos');
   // El campo manual (escribible, con teclado) manda si tiene texto; si está vacío, se usa
   // el de escaneo (sin teclado, resuelve códigos de agencia vía resolverQueryPedido). Así
   // conviven sin pisarse: uno para teclear, el otro solo para la pistola.
@@ -5837,6 +5892,7 @@ function renderStockSoon(){
 // Tras validar una línea (o un kit): si era la última, valida el pedido (una sola escritura del
 // pedido, ya validado); si no, guarda la línea. deltas = [[ean, unidades], ...] de stock validado.
 async function cerrarLineaValidada(order, deltas){
+  invalidarReservas(); // la línea acaba de cambiar en memoria
   const incrementos = deltas.map(([ean, delta])=>incrementStockValidatedRemote(ean, delta, order.id));
   const incomplete = order.lines.filter(l=>!(l.esKit && isLegacyExpandedKit(order,l)) && Number(l.qtyPicked||0)<Number(l.qty||0));
   if(!incomplete.length){
@@ -6035,6 +6091,7 @@ async function finalizeOrder(orderId){
   // ningún "await" por medio y las escrituras se lanzan en segundo plano
   // (guardarEnSegundoPlano), así que ese fallo no puede darse y la pantalla responde al instante.
   const escrituras = [];
+  invalidarReservas();
   {
     for(const l of order.lines){
       if(l.esKit) continue;
@@ -6289,7 +6346,7 @@ function renderOrderDetail(orderId){
       }, 350);
     });
   });
-  box.querySelectorAll('.gotoLineBtn').forEach(btn=>btn.addEventListener('click', ()=>{ const ean=btn.dataset.ean; $('#locEAN').value = ean; document.querySelectorAll('.subtabs button').forEach(b=>b.classList.remove('active')); const ubicBtn=document.querySelector('[data-panel="ubicadorPanel"]'); if(ubicBtn) ubicBtn.classList.add('active'); ['ubicadorPanel','inventoryPanel','pickingPanel'].forEach(id=>document.getElementById(id).classList.add('hidden')); document.getElementById('ubicadorPanel').classList.remove('hidden'); ['centerUbicador','centerInventario','centerPicking'].forEach(id=>document.getElementById(id)?.classList.add('hidden')); document.getElementById('centerUbicador')?.classList.remove('hidden'); renderLocations(ean); }));
+  box.querySelectorAll('.gotoLineBtn').forEach(btn=>btn.addEventListener('click', ()=>{ const ean=btn.dataset.ean; $('#locEAN').value = ean; document.querySelectorAll('.subtabs button').forEach(b=>b.classList.remove('active')); const ubicBtn=document.querySelector('[data-panel="ubicadorPanel"]'); if(ubicBtn) ubicBtn.classList.add('active'); ['ubicadorPanel','inventoryPanel','pickingPanel'].forEach(id=>document.getElementById(id).classList.add('hidden')); document.getElementById('ubicadorPanel').classList.remove('hidden'); ['centerUbicador','centerInventario','centerPicking'].forEach(id=>document.getElementById(id)?.classList.add('hidden')); document.getElementById('centerUbicador')?.classList.remove('hidden'); renderPendientesVisibles(); renderLocations(ean); }));
   box.querySelectorAll('.editEanBtn').forEach(btn=>btn.addEventListener('click', ()=>{
     editarEanLinea(btn.dataset.order, parseInt(btn.dataset.line, 10));
   }));
@@ -11144,6 +11201,7 @@ function navegarA(panelId, pushHistory=true){
   if(panelId==='kitsPanel') renderKits($('#kitsSearch')?.value||'');
   if(panelId==='informesPanel') renderInformes();
   if(panelId==='borradosPanel'){ if(_borradosCargados) renderBorrados(); else cargarBorrados(); }
+  renderPendientesVisibles(); // p.ej. el catálogo de la izquierda, si cambió mientras estaba oculto
 
   // Guardar en historial del navegador
   if(pushHistory){
@@ -11914,6 +11972,7 @@ document.getElementById("toggleCatalog")?.addEventListener("click", ()=>{
   const el = document.getElementById("catalogContent");
   if(!el) return;
   el.style.display = (el.style.display === "none") ? "block" : "none";
+  renderPendientesVisibles();
 });
 
 </script>
