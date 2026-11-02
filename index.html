@@ -3203,6 +3203,7 @@ function registrarMovimientoStock(m){
     const data = {
       ean:String(m.ean), nombre:m.nombre || row.name || '', tipo:m.tipo, delta:Number(m.delta),
       antes:Number(m.antes), despues:Number(m.despues), origen:m.origen || '', ref:m.ref || '',
+      ...(m.pack ? { pack:m.pack } : {}),
       usuarioUid: currentUid || null, usuarioEmail: auth?.currentUser?.email || null,
       ts: Date.now(), fecha: serverTimestamp()
     };
@@ -3210,13 +3211,31 @@ function registrarMovimientoStock(m){
       .catch(err=>console.warn('[movimientosStock] no se pudo registrar:', err?.message || err));
   }catch(err){ console.warn('[movimientosStock]', err?.message || err); }
 }
+// Packs del pedido en los que va este artículo como componente (02/11/2026): para que en el
+// historial de movimientos se vea "dentro del pack X" y se pueda cuadrar la salida con el pedido.
+function packsDeArticuloEnPedido(orderId, ean){
+  const o = orderId ? (state.orders||[]).find(x=>String(x.id)===String(orderId)) : null;
+  if(!o) return '';
+  const e = String(ean).trim(), packs = [];
+  for(const l of o.lines||[]){
+    if(l.esKit && !isLegacyExpandedKit(o, l)){
+      const comp = (KITS[String(l.ean).trim()]?.componentes || []).find(c=>String(c.ean).trim()===e);
+      if(comp) packs.push(`${l.name || KITS[String(l.ean).trim()]?.nombre || l.ean} (${l.ean}) ×${l.qty}`);
+    }else if(l.esComponenteKit && l.kitEan && String(l.ean).trim()===e){
+      const cab = (o.lines||[]).find(x=>x.esKit && String(x.ean)===String(l.kitEan));
+      packs.push(`${cab?.name || l.kitEan} (${l.kitEan})`);
+    }
+  }
+  return [...new Set(packs)].join(' · ');
+}
 async function incrementStockValidatedRemote(ean, delta, ref){
   if(!db || !ean || !delta) return;
   if(String(ean).startsWith('CLIENTE-')) return; // no es inventario operativo real
   { const _r = state.inventory?.byEan?.[ean];
     if(_r){ const disp = Number(_r.stockBase||0) - Number(_r.stockValidated||0);
       registrarMovimientoStock({ ean, tipo:'salida', delta:-delta, antes:disp+delta, despues:disp,
-        origen: delta > 0 ? 'salida por pedido validado' : 'reversión de validación', ref: ref || '' }); } }
+        origen: delta > 0 ? 'salida por pedido validado' : 'reversión de validación', ref: ref || '',
+        pack: packsDeArticuloEnPedido(ref, ean) }); } }
   setSyncStatus('syncing');
   try{
     await updateDoc(inventoryRef(ean), { stockValidated: increment(delta), updatedAt: serverTimestamp(), updatedBy: currentUid || 'anon' });
@@ -5766,10 +5785,10 @@ async function deleteOrdersBulk(orderIds){
   }
   if(!confirm(msg)) return;
 
-  const deltasSync = new Map();
+  const deltasSync = []; // [pedido, ean, delta]
   for(const order of orders){
     for(const l of pickedLinesOf(order)){
-      revertLinePickedStock(l).forEach(({ean,delta})=>deltasSync.set(ean, (deltasSync.get(ean)||0) + delta));
+      revertLinePickedStock(l).forEach(({ean,delta})=>deltasSync.push([order.id, ean, delta]));
     }
   }
 
@@ -5782,7 +5801,7 @@ async function deleteOrdersBulk(orderIds){
   for(const order of orders) registrarBorradoPedido(order, 'masivo');
   try{
     for(const id of ids) await deleteOrderRemote(id);
-    for(const [ean,delta] of deltasSync) await incrementStockValidatedRemote(ean, delta);
+    for(const [pedido,ean,delta] of deltasSync) await incrementStockValidatedRemote(ean, delta, pedido);
     if($('#ordersInfo')) $('#ordersInfo').textContent = `✓ ${orders.length} pedido(s) borrado(s).`;
   }catch(err){
     alert('Los pedidos se borraron localmente pero hubo un error al sincronizar con la base de datos: ' + err.message);
@@ -5806,9 +5825,11 @@ async function validateOrdersBulk(orderIds){
     + orders.map(o=>`• ${o.id} (${o.customer||'-'})`).join('\n');
   if(!confirm(msg)) return;
 
-  const eansToSync = new Map(); // ean -> incremento total a aplicar en Firestore
-  const sumarSync = (ean, delta) => eansToSync.set(ean, (eansToSync.get(ean)||0) + delta);
+  const eansToSync = new Map(); // "pedido|ean" -> incremento a aplicar en Firestore
+  let pedidoActual = null;
+  const sumarSync = (ean, delta) => { const k = pedidoActual + '|' + ean; eansToSync.set(k, (eansToSync.get(k)||0) + delta); };
   for(const order of orders){
+    pedidoActual = order.id;
     for(const l of order.lines){
       if(l.esKit){
         if(isLegacyExpandedKit(order, l)) continue; // legacy: sus componentes ya son líneas propias
@@ -5848,7 +5869,7 @@ async function validateOrdersBulk(orderIds){
 
   try{
     for(const order of orders) await saveOrderRemote(order);
-    for(const [ean, delta] of eansToSync) await incrementStockValidatedRemote(ean, delta);
+    for(const [k, delta] of eansToSync){ const [pedido, ean] = k.split('|'); await incrementStockValidatedRemote(ean, delta, pedido); }
     if($('#ordersInfo')) $('#ordersInfo').textContent = `✓ ${orders.length} pedido(s) validado(s) en bloque.`;
   }catch(err){
     alert('Los pedidos se validaron localmente pero hubo un error al sincronizar con la base de datos: ' + err.message);
@@ -6050,7 +6071,7 @@ async function revertOrderToPending(orderId){
 
   saveCache(); renderOrders(); renderOrderDetail(order.id); renderInventoryTable(); renderItems($('#search').value); updateStats();
   await saveOrderRemote(order);
-  for(const [ean,delta] of deltasSync) await incrementStockValidatedRemote(ean, delta);
+  for(const [ean,delta] of deltasSync) await incrementStockValidatedRemote(ean, delta, order.id);
 }
 
 async function finalizeOrder(orderId){
@@ -6101,7 +6122,7 @@ async function finalizeOrder(orderId){
         ensureInventoryFromLine(l);
         state.inventory.byEan[l.ean].stockValidated = Number(state.inventory.byEan[l.ean].stockValidated||0) + picked;
         l.stockCounted = true;
-        escrituras.push(incrementStockValidatedRemote(l.ean, picked));
+        escrituras.push(incrementStockValidatedRemote(l.ean, picked, order.id));
       }
     }
     saveCacheSoon(); renderOrders(); renderStockSoon(); updateStats();
@@ -6870,7 +6891,7 @@ async function reserveOrder(orderId){
           ensureInventoryLocal(comp.ean, comp.nombre);
           const delta = comp.qty * pendientesKit;
           state.inventory.byEan[comp.ean].stockValidated = Number(state.inventory.byEan[comp.ean].stockValidated||0) + delta;
-          await incrementStockValidatedRemote(comp.ean, delta);
+          await incrementStockValidatedRemote(comp.ean, delta, orderId);
         }
         l.qtyPicked = Number(l.qty||0);
         l.stockCounted = true;
@@ -6883,7 +6904,7 @@ async function reserveOrder(orderId){
       state.inventory.byEan[l.ean].stockValidated = Number(state.inventory.byEan[l.ean].stockValidated||0) + pendientes;
       l.qtyPicked = Number(l.qty||0);
       l.stockCounted = true;
-      await incrementStockValidatedRemote(l.ean, pendientes);
+      await incrementStockValidatedRemote(l.ean, pendientes, orderId);
     }
   }
   order.status = 'reserved';
@@ -8099,14 +8120,14 @@ function renderMovimientos(){
     lista.map(m=>{
       const d = Number(m.delta||0);
       const col = d > 0 ? '#27ae60' : '#e74c3c';
-      return `<tr style="border-bottom:1px solid var(--muted)"><td style="padding:4px;white-space:nowrap">${escapeHtml(fmtMovFecha(m))}</td><td>${escapeHtml(m.nombre||'')}<div class="small" style="font-family:monospace">${escapeHtml(m.ean||'')}</div></td><td>${m.tipo==='salida'?'Salida (disponible)':'Base'}</td><td style="text-align:right;color:${col};font-weight:700">${d>0?'+':''}${d}</td><td style="text-align:right;white-space:nowrap">${m.antes} → ${m.despues}</td><td>${escapeHtml(m.origen||'')}</td><td>${escapeHtml(m.ref||'')}</td><td>${escapeHtml(m.usuarioEmail||m.usuarioUid||'')}</td></tr>`;
+      return `<tr style="border-bottom:1px solid var(--muted)"><td style="padding:4px;white-space:nowrap">${escapeHtml(fmtMovFecha(m))}</td><td>${escapeHtml(m.nombre||'')}<div class="small" style="font-family:monospace">${escapeHtml(m.ean||'')}</div></td><td>${m.tipo==='salida'?'Salida (disponible)':'Base'}</td><td style="text-align:right;color:${col};font-weight:700">${d>0?'+':''}${d}</td><td style="text-align:right;white-space:nowrap">${m.antes} → ${m.despues}</td><td>${escapeHtml(m.origen||'')}</td><td>${escapeHtml(m.ref||'')}${m.pack ? `<div class="small" style="color:#e67e22">📦 dentro de ${escapeHtml(m.pack)}</div>` : ''}</td><td>${escapeHtml(m.usuarioEmail||m.usuarioUid||'')}</td></tr>`;
     }).join('')}</tbody></table>`;
 }
 function exportarMovimientosCsv(){
   const lista = movimientosFiltrados();
   if(!lista.length){ alert('No hay movimientos que exportar.'); return; }
-  const csv = [['Fecha','EAN','Artículo','Tipo','Cambio','Antes','Después','Origen','Ref.','Usuario']].concat(
-    lista.map(m=>[fmtMovFecha(m), m.ean, m.nombre||'', m.tipo==='salida'?'Salida (disponible)':'Base', m.delta, m.antes, m.despues, m.origen||'', m.ref||'', m.usuarioEmail||m.usuarioUid||'']))
+  const csv = [['Fecha','EAN','Artículo','Tipo','Cambio','Antes','Después','Origen','Ref.','Pack','Usuario']].concat(
+    lista.map(m=>[fmtMovFecha(m), m.ean, m.nombre||'', m.tipo==='salida'?'Salida (disponible)':'Base', m.delta, m.antes, m.despues, m.origen||'', m.ref||'', m.pack||'', m.usuarioEmail||m.usuarioUid||'']))
     .map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(';')).join('\r\n');
   const blob = new Blob(['\ufeff'+csv], { type:'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
