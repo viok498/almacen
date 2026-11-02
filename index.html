@@ -1921,7 +1921,7 @@ let importCtx = null;
 let isImporting = 0; // contador (no booleano — ver fallo del 01/10/2026 en cleanClienteCatalogEntries)
 let isCleaning = 0; // contador — >0 significa bloqueado
 let initialCleanupDone = false; // evita re-programar la limpieza en cada snapshot (ver markLoaded)
-let isPicking = false;
+let isPicking = 0; // contador, como isImporting: puede haber varios guardados de picking a la vez
 let selectedOrderIds = new Set(); // multi-selección de pedidos (Ctrl/Cmd+clic) para borrado masivo
 
 function $(sel){ return document.querySelector(sel); }
@@ -2161,7 +2161,9 @@ function setSyncStatus(status, error=''){
   state.sync.error = error || null;
   if(status === 'synced') state.sync.lastSyncAt = Date.now();
   renderSyncBadge();
-  saveCache();
+  // Diferido (02/11/2026): saveCache() serializa TODO el SGA a localStorage y esto se llama
+  // dos veces por cada escritura en Firestore — al validar un pedido eran ~10 copias seguidas.
+  saveCacheSoon();
 }
 
 function renderSyncBadge(){
@@ -3253,7 +3255,7 @@ async function saveInventoryItemRemote(ean, origen){
 
 async function saveOrderRemote(order){
   if(!db || !order?.id) return;
-  saveCache();
+  saveCacheSoon();
   setSyncStatus('syncing');
   await setDoc(orderRef(order.id), { ...deepClone(order), updatedAt:serverTimestamp(), updatedBy: currentUid || 'anon' }, { merge:true });
   setSyncStatus('synced');
@@ -5799,17 +5801,54 @@ async function validateOrdersBulk(orderIds){
 }
 window.validateOrdersBulk = validateOrdersBulk;
 
-// Si ya no queda ninguna línea pendiente, valida el pedido solo -- ya no hace falta pulsar
-// "Validar pedido" a mano cuando se ha ido validando línea a línea. finalizeOrder() no
-// vuelve a preguntar nada en este caso (el aviso de "líneas incompletas" solo salta si
-// realmente queda alguna pendiente), y respeta el flag stockCounted para no descontar el
-// stock dos veces.
-async function checkAutoFinalize(order){
-  if(!order || order.status === 'validated' || order.status === 'partial') return false;
+// Si ya no queda ninguna línea pendiente, el pedido se valida solo (cerrarLineaValidada) -- ya
+// no hace falta pulsar "Validar pedido" a mano cuando se ha ido validando línea a línea.
+// finalizeOrder() no vuelve a preguntar nada en este caso (el aviso de "líneas incompletas"
+// solo salta si realmente queda alguna pendiente), y respeta el flag stockCounted para no
+// descontar el stock dos veces.
+// ── Validación rápida (02/11/2026, Víctor: "tarda mucho en validar") ──
+// Antes, al completar la última línea, el SGA esperaba a que el servidor confirmara cada
+// guardado (primero la línea, luego el pedido validado, y con "Validar pedido" una escritura de
+// stock tras otra), copiaba todo el SGA a localStorage ~10 veces y redibujaba dos veces el
+// inventario y el catálogo completos. Ahora el pedido queda validado en pantalla al instante y
+// las escrituras van en segundo plano: Firestore las aplica primero a su copia local
+// (persistencia IndexedDB) y las sube en cuanto puede, aunque la red vaya lenta o se corte un
+// momento. Como el pedido ya está entero en memoria cuando se lanzan, ningún aviso del listener
+// puede pisarlo a medias (el motivo de isPicking); aun así isPicking cubre el primer momento.
+function guardarEnSegundoPlano(promesas){
+  isPicking++;
+  const fin = Promise.allSettled(promesas).then(rs=>{
+    const fallo = rs.find(r=>r.status === 'rejected');
+    if(fallo){
+      console.error('[Picking] fallo al guardar en segundo plano', fallo.reason);
+      setSyncStatus('error', fallo.reason?.message || 'Error al guardar el pedido');
+    }
+  });
+  Promise.race([fin, new Promise(r=>setTimeout(r, 1500))]).finally(()=>{ isPicking = Math.max(0, isPicking - 1); });
+  return fin;
+}
+// El inventario y el catálogo no están a la vista durante el picking: se redibujan un momento
+// después, una sola vez aunque se validen varias líneas seguidas.
+let _renderStockTimer = null;
+function renderStockSoon(){
+  clearTimeout(_renderStockTimer);
+  _renderStockTimer = setTimeout(()=>{ renderInventoryTable(); renderItems($('#search')?.value || ''); }, 800);
+}
+// Tras validar una línea (o un kit): si era la última, valida el pedido (una sola escritura del
+// pedido, ya validado); si no, guarda la línea. deltas = [[ean, unidades], ...] de stock validado.
+async function cerrarLineaValidada(order, deltas){
+  const incrementos = deltas.map(([ean, delta])=>incrementStockValidatedRemote(ean, delta, order.id));
   const incomplete = order.lines.filter(l=>!(l.esKit && isLegacyExpandedKit(order,l)) && Number(l.qtyPicked||0)<Number(l.qty||0));
-  if(incomplete.length) return false;
-  await finalizeOrder(order.id);
-  return true;
+  if(!incomplete.length){
+    guardarEnSegundoPlano(incrementos);
+    await finalizeOrder(order.id);
+    alert('✅ Última línea completada — pedido validado automáticamente.');
+    setTimeout(()=>$('#orderSearch')?.focus(), 100);
+    return;
+  }
+  saveCacheSoon(); renderOrders(); renderStockSoon();
+  renderOrderDetail(order.id);
+  guardarEnSegundoPlano([saveOrderRemote(order), ...incrementos]);
 }
 
 // Comprueba si unos últimos N dígitos de un EAN coinciden con más de un artículo distinto
@@ -5874,13 +5913,7 @@ async function validatePickedLine(orderId, lineIdx, scannedEan, skipEanCheck=fal
       state.inventory.byEan[comp.ean].stockValidated = Number(state.inventory.byEan[comp.ean].stockValidated||0) + delta;
       deltasSync.set(comp.ean, (deltasSync.get(comp.ean)||0) + delta);
     }
-    saveCache(); renderOrders(); renderInventoryTable(); renderItems($('#search').value);
-    renderOrderDetail(orderId);
-    isPicking = true;
-    await Promise.all([saveOrderRemote(order), ...[...deltasSync].map(([ean,delta])=>incrementStockValidatedRemote(ean, delta, order.id))]);
-    isPicking = false;
-    const autoValidated = await checkAutoFinalize(order);
-    if(autoValidated){ alert('✅ Última línea completada — pedido validado automáticamente.'); setTimeout(()=>$('#orderSearch')?.focus(), 100); }
+    await cerrarLineaValidada(order, [...deltasSync]);
     return;
   }
   // Artículos del cliente (código interno CLIENTE-) no requieren verificación de EAN.
@@ -5914,13 +5947,7 @@ async function validatePickedLine(orderId, lineIdx, scannedEan, skipEanCheck=fal
   ensureInventoryFromLine(line);
   state.inventory.byEan[line.ean].stockValidated = Number(state.inventory.byEan[line.ean].stockValidated||0) + pendientes;
   line.stockCounted = true; // evita que finalizeOrder vuelva a descontar esta línea
-  saveCache(); renderOrders(); renderInventoryTable(); renderItems($('#search').value);
-  renderOrderDetail(orderId);
-  isPicking = true;
-  await Promise.all([saveOrderRemote(order), incrementStockValidatedRemote(line.ean, pendientes, order.id)]);
-  isPicking = false;
-  const autoValidated = await checkAutoFinalize(order);
-  if(autoValidated){ alert('✅ Última línea completada — pedido validado automáticamente.'); setTimeout(()=>$('#orderSearch')?.focus(), 100); }
+  await cerrarLineaValidada(order, [[line.ean, pendientes]]);
 }
 
 // Revierte un pedido ya validado (o con entrega parcial) de vuelta a pendiente, por si
@@ -6001,15 +6028,14 @@ async function finalizeOrder(orderId){
   // Descontar stock de líneas validadas (solo si no se descontó ya al validar la línea
   // individualmente — evita el doble descuento cuando se valida línea a línea y luego
   // se pulsa "Validar pedido")
-  // isPicking=true mientras se guarda: evita que una actualización del listener de
-  // 'orders' (eco del propio guardado, u otro dispositivo) llegue a mitad de este cierre
-  // y sustituya en memoria el "order" que aún se está terminando de marcar como validado
-  // — es el mismo fallo, ya corregido aquí, que podía dejar un pedido con la línea 100%
-  // completa pero el estado colgado en "en picking" (Víctor, 02/10/2026). try/finally para
-  // que, si algo falla a mitad (p.ej. se corta la red), isPicking no se quede bloqueado
-  // en true para siempre y deje de sincronizar pedidos.
-  isPicking = true;
-  try{
+  // Antes se esperaba a Firestore entre escritura y escritura, y una actualización del listener
+  // de 'orders' podía llegar a mitad de este cierre y sustituir en memoria el "order" que aún se
+  // estaba marcando como validado (pedido con la línea 100% completa pero colgado en "en
+  // picking", Víctor, 02/10/2026). Desde el 02/11/2026 todo el pedido se marca en memoria sin
+  // ningún "await" por medio y las escrituras se lanzan en segundo plano
+  // (guardarEnSegundoPlano), así que ese fallo no puede darse y la pantalla responde al instante.
+  const escrituras = [];
+  {
     for(const l of order.lines){
       if(l.esKit) continue;
       const picked = Number(l.qtyPicked||0);
@@ -6017,10 +6043,10 @@ async function finalizeOrder(orderId){
         ensureInventoryFromLine(l);
         state.inventory.byEan[l.ean].stockValidated = Number(state.inventory.byEan[l.ean].stockValidated||0) + picked;
         l.stockCounted = true;
-        await incrementStockValidatedRemote(l.ean, picked);
+        escrituras.push(incrementStockValidatedRemote(l.ean, picked));
       }
     }
-    saveCache(); renderOrders(); renderInventoryTable(); renderItems($('#search').value); updateStats();
+    saveCacheSoon(); renderOrders(); renderStockSoon(); updateStats();
     // Al terminar, volver al buscador listo para el siguiente escaneo — sin esto,
     // renderOrders() seleccionaría automáticamente el siguiente pedido pendiente de la
     // lista, en vez de dejar la pantalla neutra para escanear/buscar el que toque.
@@ -6040,10 +6066,9 @@ async function finalizeOrder(orderId){
     // El buscador tiene inputmode="none", así que enfocarlo NO abre el teclado del móvil —
     // queda listo para recibir el escaneo de la siguiente etiqueta sin tocar la pantalla.
     setTimeout(()=>$('#orderSearch')?.focus(), 100);
-    await saveOrderRemote(order);
-  } finally {
-    isPicking = false;
+    escrituras.push(saveOrderRemote(order));
   }
+  guardarEnSegundoPlano(escrituras);
 }
 
 // Detecta artículos que son en sí mismos un "set" de muchas piezas pesadas (sets de
@@ -11038,8 +11063,7 @@ function handleScannerCode(raw){
   if(state.ui.scanTarget==='lineCam'){
     const oId=state.ui.scanLineOrder; const lineIdx=state.ui.scanLineIdx;
     if(oId!==undefined && lineIdx!==undefined){
-      validatePickedLine(oId, lineIdx, rawNorm);
-      renderOrderDetail(oId);
+      validatePickedLine(oId, lineIdx, rawNorm); // ya redibuja el detalle (o lo cierra si valida el pedido)
     }
     return;
   }
@@ -11047,7 +11071,7 @@ function handleScannerCode(raw){
     const order = (state.orders||[]).find(o=>o.id===state.ui.selectedOrderId);
     if(!order){ $('#locEAN').value = raw; renderLocations(raw); return; }
     const idx = order.lines.findIndex(l=>l.ean===raw && Number(l.qtyPicked||0)<Number(l.qty||0));
-    if(idx>=0){ validatePickedLine(order.id, idx, raw); renderOrderDetail(order.id); } else alert('Ese EAN no coincide con ninguna línea pendiente del pedido seleccionado.');
+    if(idx>=0){ validatePickedLine(order.id, idx, raw); } else alert('Ese EAN no coincide con ninguna línea pendiente del pedido seleccionado.');
   } else { $('#locEAN').value = raw; renderLocations(raw); }
 }
 
@@ -11707,7 +11731,7 @@ $('#clearOrderSearchManualBtn')?.addEventListener('click', ()=>{
       if(!raw) return;
       if(!order){ intentarSaltoPedido(raw); return; }
       const idx = order.lines.findIndex(l=>l.ean===raw && Number(l.qtyPicked||0)<Number(l.qty||0));
-      if(idx>=0){ validatePickedLine(order.id, idx, raw); renderOrderDetail(order.id); }
+      if(idx>=0){ validatePickedLine(order.id, idx, raw); }
       else alert('Ese EAN no coincide con ninguna línea pendiente de este pedido.');
       return;
     }
