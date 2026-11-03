@@ -28,12 +28,6 @@
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script>
-document.getElementById("toggleCatalog")?.addEventListener("click", ()=>{
-  const el = document.getElementById("catalogContent");
-  if(!el) return;
-  el.style.display = (el.style.display === "none") ? "block" : "none";
-});
-
 document.addEventListener("DOMContentLoaded", ()=>{
   ["newEAN","locEAN","search"].forEach(id=>{
     const el = document.getElementById(id);
@@ -203,6 +197,29 @@ textarea{resize:vertical}
   .mobile-toggle{margin-bottom:8px;}
 }
 
+/* ═══════ Distribución de pantalla (03/11/2026) ═══════
+   - Pestañas que no usan el centro (Tareas, Cargas, Historial, Reservas, Kits…): el panel de
+     la derecha ocupa también el centro, que si no se quedaba vacío.
+   - Catálogo plegable en PC: queda una columna estrecha con el botón para desplegarlo.
+   - Usuario de almacén: sin catálogo, no se reserva su columna. */
+body.panel-ancho .center{display:none}
+body.panel-ancho .right{grid-column:center-start / right-end}
+body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
+.mobile-toggle{margin-bottom:8px}
+@media (min-width:1201px){
+  /* El catálogo se queda fijo a la vista y su lista hace scroll por dentro. */
+  aside.left{position:sticky;top:10px;align-self:start;max-height:calc(100vh - 20px)}
+  #catalogContent{display:flex;flex-direction:column;flex:1;min-height:0}
+  body.catalogo-plegado .app{grid-template-columns:64px 1fr 430px}
+  body.catalogo-plegado #catalogContent{display:none !important}
+  body.catalogo-plegado .tc-txt{display:none}
+  body.catalogo-plegado #toggleCatalog{width:100%;font-size:18px}
+  body.modo-picking .app{grid-template-columns:1fr 430px;grid-template-areas:"topbar topbar" "center right"}
+  body.panel-ancho .tarea-texto{font-size:18px !important}
+}
+.cargas-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;align-items:start}
+.cargas-grid > .section{margin-top:0;border:1px solid var(--muted);border-radius:12px;padding:12px;background:#0d1320}
+
 </style>
 </head>
 
@@ -235,6 +252,7 @@ textarea{resize:vertical}
       <button class="btn active" data-panel="ubicadorPanel">📍 Ubicador</button>
       <button class="btn" data-panel="inventoryPanel">📊 Inventario</button>
       <button class="btn" data-panel="pickingPanel">🛒 Picking</button>
+      <button class="btn" id="cargasTabBtn" data-panel="cargasPanel" title="Importar inventario, entradas de mercancía y pedidos">📥 Cargas</button>
       <button class="btn" id="presupuestoTabBtn" data-panel="presupuestoPanel">📋 Presupuesto</button>
       <button class="btn" id="historialTabBtn" data-panel="historialPanel">🕓 Historial</button>
       <button class="btn" id="reservasTabBtn" data-panel="reservasPanel">📦 Reservas</button>
@@ -278,7 +296,7 @@ textarea{resize:vertical}
   <aside class="left">
 
 <div class="mobile-toggle">
-  <button id="toggleCatalog" class="btn">📦 Catálogo</button>
+  <button id="toggleCatalog" class="btn" title="Plegar o desplegar el catálogo">📦 <span class="tc-txt">Catálogo</span></button>
 </div>
 
     <div id="catalogContent"><div class="panel-title">Catálogo (EAN)</div>
@@ -294,141 +312,6 @@ textarea{resize:vertical}
       Arrastra <span class="kbd">Asignar</span> a una celda. La multi-ubicación está siempre activa.
     </div>
 
-    <div class="section">
-      <div class="panel-title">Añadir EAN manual</div>
-
-      <div class="inline">
-        <input id="newEAN" placeholder="EAN" class="input" style="flex:1" />
-        <button class="btn" id="scanNewEanBtn">📷</button>
-        <input id="newName" placeholder="Nombre (opcional)" class="input" style="flex:2" />
-        <button id="addEAN" class="btn">Añadir</button>
-      </div>
-
-      <div class="small">
-        Se guarda localmente (localStorage). Puedes exportarlo con “Exportar todo”.
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="panel-title">Importar inventario</div>
-      <div class="small">
-        Sube Excel o CSV con columnas tipo: <strong>EAN</strong>, <strong>NOMBRE</strong>, <strong>STOCK/CANTIDAD/QTY</strong>.
-      </div>
-
-      <div class="inline" style="margin-top:8px">
-        <label for="inventoryFile" class="btn">Cargar inventario</label>
-        <input type="file" id="inventoryFile" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-        <label for="refsFile" class="btn" style="background:#8e44ad;color:#fff" title="Carga ref. proveedor, nombre inglés y proveedor sin tocar el stock">📦 Cargar refs. proveedor</label>
-        <input type="file" id="refsFile" accept=".xlsx,.xls" style="display:none"/>
-        <label for="catalogoLogisticoFile" class="btn" style="background:#16a085;color:#fff" title="Carga peso y volumen por EAN (hoja Catalogo Logistica) — para la previsión automática de agencia">⚖️ Cargar peso/volumen</label>
-        <input type="file" id="catalogoLogisticoFile" accept=".xlsx,.xls" style="display:none"/>
-        <label for="tarifasFile" class="btn" style="background:#16a085;color:#fff" title="Carga las tarifas de transporte (hoja GENERAL + CONVERSIÓN_VOLUMÉTRICA) — para la previsión automática de agencia">💰 Cargar tarifas</label>
-        <input type="file" id="tarifasFile" accept=".xlsx,.xls" style="display:none"/>
-        <button id="clearInventoryBtn" class="btn ghost" style="color:var(--danger);border-color:var(--danger)" title="Borrar catálogo e inventario">🗑 Limpiar</button>
-        <button id="resetValidatedBtn" class="btn ghost" style="color:var(--warn);border-color:var(--warn)" title="Poner a cero el stock validado">↺ Reset validado</button>
-        <label for="entradaMercanciaFile" class="btn" style="background:#27ae60;color:#fff" title="Sube Excel de entrada de mercancía — suma cantidades al stock">📥 Entrada mercancía</label>
-        <input type="file" id="entradaMercanciaFile" accept=".xlsx,.xls" style="display:none"/>
-        <button id="historialEntradasBtn" class="btn ghost" style="color:#27ae60;border-color:#27ae60" title="Ver historial de entradas">📋 Historial entradas</button>
-      </div>
-
-      <div id="inventoryInfo" class="small" style="margin-top:6px">Sin inventario importado.</div>
-      <!-- Historial entradas -->
-      <div id="historialEntradasPanel" class="hidden" style="margin-top:10px;border:1px solid #27ae60;border-radius:8px;padding:10px">
-        <div style="font-weight:700;font-size:13px;color:#27ae60;margin-bottom:8px">📋 Historial de entradas de mercancía</div>
-        <div id="historialEntradasList"></div>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="panel-title">Importar pedidos</div>
-
-      <div class="small" style="margin-bottom:8px">Selecciona el canal:</div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">🌐 Web</span>
-          <label for="ordersFileWeb" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileWeb" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfWeb" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar PDFs de pedidos web (múltiple)">PDF</label>
-          <input type="file" id="ordersFilePdfWeb" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">🎯 Decathlon</span>
-          <label for="ordersFileDecathlon" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileDecathlon" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfDecathlon" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
-          <input type="file" id="ordersFilePdfDecathlon" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">🟢 Leroy M</span>
-          <label for="ordersFileLeroy" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileLeroy" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfLeroy" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albaranes PDF Leroy (múltiple)">PDF</label>
-          <input type="file" id="ordersFilePdfLeroy" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">🏃 Sprinter</span>
-          <label for="ordersFileSprinter" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileSprinter" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfSprinter" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
-          <input type="file" id="ordersFilePdfSprinter" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">🔴 Worten</span>
-          <label for="ordersFileWorten" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileWorten" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfWorten" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
-          <input type="file" id="ordersFilePdfWorten" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">📦 Amazon</span>
-          <label for="ordersFileAmazonTxt" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileAmazonTxt" accept=".txt,.csv,.tsv" style="display:none"/>
-          <label for="ordersFilePdfAmazon" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albaranes PDF de Amazon (múltiple)">PDF</label>
-          <input type="file" id="ordersFilePdfAmazon" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">📋 ClassicGes</span>
-          <label for="ordersFileClassicGes" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFileClassicGes" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-          <label for="ordersFilePdfPresupuesto" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar presupuesto(s) PDF de ClassicGes (múltiple)">PDF</label>
-          <input type="file" id="ordersFilePdfPresupuesto" accept=".pdf" multiple style="display:none"/>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="small" style="width:60px;color:var(--text)">📦 Genérico</span>
-          <label for="ordersFile" class="btn" style="flex:1;text-align:center">Cargar</label>
-          <input type="file" id="ordersFile" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
-        </div>
-
-        <button id="clearOrdersBtn" class="btn ghost" style="color:var(--danger);border-color:var(--danger);margin-top:4px">🗑 Limpiar todos los pedidos</button>
-        <button id="historialCargasBtn" class="btn ghost" style="margin-top:4px">🕓 Historial de cargas</button>
-        <button id="historialVinculacionesBtn" class="btn ghost" style="margin-top:4px">🔍 Ver vinculaciones de agencia (por fecha)</button>
-      </div>
-
-      <div id="ordersInfo" class="small" style="margin-top:6px">Sin pedidos importados.</div>
-      <div id="historialCargasPanel" class="hidden" style="margin-top:10px;border:1px solid var(--accent,#2e75b6);border-radius:8px;padding:10px">
-        <div style="font-weight:700;font-size:13px;color:var(--accent,#2e75b6);margin-bottom:8px">🕓 Historial de cargas (pedidos y relaciones de agencia)</div>
-        <div id="historialCargasList"></div>
-      </div>
-      <div id="historialVinculacionesPanel" class="hidden" style="margin-top:10px;border:1px solid #8e44ad;border-radius:8px;padding:10px">
-        <div style="font-weight:700;font-size:13px;color:#8e44ad;margin-bottom:4px">🔍 Vinculaciones de agencia guardadas, por fecha</div>
-        <div class="small" style="margin-bottom:8px">La columna "Dígitos" te dice si ese día se guardó el código corto del manifiesto (normalmente 7-10 dígitos) o el código completo real de un escaneo (normalmente 20+ dígitos).</div>
-        <div class="inline" style="gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
-          <label class="small">Desde <input type="date" id="vinculacionesDesde" class="input" style="width:auto"></label>
-          <label class="small">Hasta <input type="date" id="vinculacionesHasta" class="input" style="width:auto"></label>
-          <button class="btn" id="vinculacionesFiltrarBtn">Filtrar</button>
-          <button class="btn ghost" id="vinculacionesLimpiarBtn">Quitar filtro</button>
-        </div>
-        <div id="historialVinculacionesList"></div>
-      </div>
-    </div>
   </div>
 </aside>
 
@@ -653,6 +536,148 @@ textarea{resize:vertical}
   </main>
 
   <aside class="right">
+
+    <!-- Cargas (03/11/2026): antes estaban debajo del catálogo, al final de la lista de artículos -->
+    <div id="cargasPanel" class="hidden" style="flex-direction:column;flex:1;min-height:0;padding:10px;overflow:auto">
+      <div class="panel-title">📥 Cargas: inventario, entradas de mercancía y pedidos</div>
+      <div class="cargas-grid">
+        <div class="section">
+          <div class="panel-title">Añadir EAN manual</div>
+    
+          <div class="inline">
+            <input id="newEAN" placeholder="EAN" class="input" style="flex:1" />
+            <button class="btn" id="scanNewEanBtn">📷</button>
+            <input id="newName" placeholder="Nombre (opcional)" class="input" style="flex:2" />
+            <button id="addEAN" class="btn">Añadir</button>
+          </div>
+    
+          <div class="small">
+            Se guarda localmente (localStorage). Puedes exportarlo con “Exportar todo”.
+          </div>
+        </div>
+    
+        <div class="section">
+          <div class="panel-title">Importar inventario</div>
+          <div class="small">
+            Sube Excel o CSV con columnas tipo: <strong>EAN</strong>, <strong>NOMBRE</strong>, <strong>STOCK/CANTIDAD/QTY</strong>.
+          </div>
+    
+          <div class="inline" style="margin-top:8px">
+            <label for="inventoryFile" class="btn">Cargar inventario</label>
+            <input type="file" id="inventoryFile" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+            <label for="refsFile" class="btn" style="background:#8e44ad;color:#fff" title="Carga ref. proveedor, nombre inglés y proveedor sin tocar el stock">📦 Cargar refs. proveedor</label>
+            <input type="file" id="refsFile" accept=".xlsx,.xls" style="display:none"/>
+            <label for="catalogoLogisticoFile" class="btn" style="background:#16a085;color:#fff" title="Carga peso y volumen por EAN (hoja Catalogo Logistica) — para la previsión automática de agencia">⚖️ Cargar peso/volumen</label>
+            <input type="file" id="catalogoLogisticoFile" accept=".xlsx,.xls" style="display:none"/>
+            <label for="tarifasFile" class="btn" style="background:#16a085;color:#fff" title="Carga las tarifas de transporte (hoja GENERAL + CONVERSIÓN_VOLUMÉTRICA) — para la previsión automática de agencia">💰 Cargar tarifas</label>
+            <input type="file" id="tarifasFile" accept=".xlsx,.xls" style="display:none"/>
+            <button id="clearInventoryBtn" class="btn ghost" style="color:var(--danger);border-color:var(--danger)" title="Borrar catálogo e inventario">🗑 Limpiar</button>
+            <button id="resetValidatedBtn" class="btn ghost" style="color:var(--warn);border-color:var(--warn)" title="Poner a cero el stock validado">↺ Reset validado</button>
+            <label for="entradaMercanciaFile" class="btn" style="background:#27ae60;color:#fff" title="Sube Excel de entrada de mercancía — suma cantidades al stock">📥 Entrada mercancía</label>
+            <input type="file" id="entradaMercanciaFile" accept=".xlsx,.xls" style="display:none"/>
+            <button id="historialEntradasBtn" class="btn ghost" style="color:#27ae60;border-color:#27ae60" title="Ver historial de entradas">📋 Historial entradas</button>
+          </div>
+    
+          <div id="inventoryInfo" class="small" style="margin-top:6px">Sin inventario importado.</div>
+          <!-- Historial entradas -->
+          <div id="historialEntradasPanel" class="hidden" style="margin-top:10px;border:1px solid #27ae60;border-radius:8px;padding:10px">
+            <div style="font-weight:700;font-size:13px;color:#27ae60;margin-bottom:8px">📋 Historial de entradas de mercancía</div>
+            <div id="historialEntradasList"></div>
+          </div>
+        </div>
+    
+        <div class="section">
+          <div class="panel-title">Importar pedidos</div>
+    
+          <div class="small" style="margin-bottom:8px">Selecciona el canal:</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">🌐 Web</span>
+              <label for="ordersFileWeb" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileWeb" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfWeb" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar PDFs de pedidos web (múltiple)">PDF</label>
+              <input type="file" id="ordersFilePdfWeb" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">🎯 Decathlon</span>
+              <label for="ordersFileDecathlon" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileDecathlon" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfDecathlon" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
+              <input type="file" id="ordersFilePdfDecathlon" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">🟢 Leroy M</span>
+              <label for="ordersFileLeroy" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileLeroy" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfLeroy" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albaranes PDF Leroy (múltiple)">PDF</label>
+              <input type="file" id="ordersFilePdfLeroy" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">🏃 Sprinter</span>
+              <label for="ordersFileSprinter" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileSprinter" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfSprinter" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
+              <input type="file" id="ordersFilePdfSprinter" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">🔴 Worten</span>
+              <label for="ordersFileWorten" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileWorten" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfWorten" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albarán PDF">PDF</label>
+              <input type="file" id="ordersFilePdfWorten" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">📦 Amazon</span>
+              <label for="ordersFileAmazonTxt" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileAmazonTxt" accept=".txt,.csv,.tsv" style="display:none"/>
+              <label for="ordersFilePdfAmazon" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar albaranes PDF de Amazon (múltiple)">PDF</label>
+              <input type="file" id="ordersFilePdfAmazon" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">📋 ClassicGes</span>
+              <label for="ordersFileClassicGes" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFileClassicGes" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+              <label for="ordersFilePdfPresupuesto" class="btn" style="background:#c0392b;color:#fff;padding:6px 10px" title="Cargar presupuesto(s) PDF de ClassicGes (múltiple)">PDF</label>
+              <input type="file" id="ordersFilePdfPresupuesto" accept=".pdf" multiple style="display:none"/>
+            </div>
+    
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="small" style="width:60px;color:var(--text)">📦 Genérico</span>
+              <label for="ordersFile" class="btn" style="flex:1;text-align:center">Cargar</label>
+              <input type="file" id="ordersFile" accept=".xlsx,.xls,.csv,.txt" style="display:none"/>
+            </div>
+    
+            <button id="clearOrdersBtn" class="btn ghost" style="color:var(--danger);border-color:var(--danger);margin-top:4px">🗑 Limpiar todos los pedidos</button>
+            <button id="historialCargasBtn" class="btn ghost" style="margin-top:4px">🕓 Historial de cargas</button>
+            <button id="historialVinculacionesBtn" class="btn ghost" style="margin-top:4px">🔍 Ver vinculaciones de agencia (por fecha)</button>
+          </div>
+    
+          <div id="ordersInfo" class="small" style="margin-top:6px">Sin pedidos importados.</div>
+          <div id="historialCargasPanel" class="hidden" style="margin-top:10px;border:1px solid var(--accent,#2e75b6);border-radius:8px;padding:10px">
+            <div style="font-weight:700;font-size:13px;color:var(--accent,#2e75b6);margin-bottom:8px">🕓 Historial de cargas (pedidos y relaciones de agencia)</div>
+            <div id="historialCargasList"></div>
+          </div>
+          <div id="historialVinculacionesPanel" class="hidden" style="margin-top:10px;border:1px solid #8e44ad;border-radius:8px;padding:10px">
+            <div style="font-weight:700;font-size:13px;color:#8e44ad;margin-bottom:4px">🔍 Vinculaciones de agencia guardadas, por fecha</div>
+            <div class="small" style="margin-bottom:8px">La columna "Dígitos" te dice si ese día se guardó el código corto del manifiesto (normalmente 7-10 dígitos) o el código completo real de un escaneo (normalmente 20+ dígitos).</div>
+            <div class="inline" style="gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+              <label class="small">Desde <input type="date" id="vinculacionesDesde" class="input" style="width:auto"></label>
+              <label class="small">Hasta <input type="date" id="vinculacionesHasta" class="input" style="width:auto"></label>
+              <button class="btn" id="vinculacionesFiltrarBtn">Filtrar</button>
+              <button class="btn ghost" id="vinculacionesLimpiarBtn">Quitar filtro</button>
+            </div>
+            <div id="historialVinculacionesList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <section id="ubicadorPanel">
       <div class="panel-title">Detalle de zona</div>
@@ -8612,6 +8637,7 @@ function activarPanelDevoluciones(){
   ['centerUbicador','centerInventario','centerPicking'].forEach(id=>document.getElementById(id)?.classList.add('hidden'));
   ['presupuestoPanel','historialPanel','reservasPanel'].forEach(id=>document.getElementById(id)?.classList.add('hidden'));
   document.getElementById('devolucionesPanel')?.classList.remove('hidden');
+  document.body.classList.add('panel-ancho');
   document.querySelectorAll('.subtabs button').forEach(b=>b.classList.remove('active'));
   document.getElementById('devolucionesTabBtn')?.classList.add('active');
 }
@@ -9725,7 +9751,7 @@ function renderTareas(){
     <div style="display:flex;align-items:center;gap:10px;padding:12px;margin-bottom:8px;background:var(--panel,#1a2332);border-radius:10px;border-left:4px solid ${t.hecha?'var(--ok,#4caf50)':'var(--accent,#2e75b6)'}">
       <button class="tareaToggle" data-id="${escapeHtml(t.id)}" style="width:32px;height:32px;border-radius:50%;border:2px solid ${t.hecha?'var(--ok,#4caf50)':'var(--accent,#2e75b6)'};background:${t.hecha?'var(--ok,#4caf50)':'transparent'};color:#fff;cursor:pointer;font-size:16px">${t.hecha?'✓':''}</button>
       <div style="flex:1">
-        <div style="font-size:15px;${t.hecha?'text-decoration:line-through;color:var(--text-muted)':''}">${escapeHtml(t.texto||'')}</div>
+        <div class="tarea-texto" style="font-size:15px;${t.hecha?'text-decoration:line-through;color:var(--text-muted)':''}">${escapeHtml(t.texto||'')}</div>
         ${antigua?`<div style="font-size:11px;color:var(--text-muted)">↩ Pendiente desde el ${fmt(t.creadaFecha)}</div>`:''}
         ${tareaMetaHtml(t)}
       </div>
@@ -11193,7 +11219,7 @@ function navegarA(panelId, pushHistory=true){
 
   // Ocultar todos los paneles
   ['ubicadorPanel','inventoryPanel','pickingPanel',
-   'presupuestoPanel','historialPanel','reservasPanel','devolucionesPanel','listasPanel','tareasPanel','kitsPanel','informesPanel','borradosPanel']
+   'presupuestoPanel','historialPanel','reservasPanel','devolucionesPanel','listasPanel','tareasPanel','kitsPanel','informesPanel','borradosPanel','cargasPanel']
     .forEach(id=>{ const el=document.getElementById(id); if(el){el.classList.add('hidden'); el.style.display='';} });
   // Hide sobrestock overlay
   const sbPanel = document.getElementById('sobrestockPanel');
@@ -11207,7 +11233,9 @@ function navegarA(panelId, pushHistory=true){
     'inventoryPanel':'centerInventario',
     'pickingPanel':'centerPicking'
   };
-  const flexPanels = new Set(['sobrestockPanel','historialPanel','reservasPanel','presupuestoPanel','devolucionesPanel','listasPanel','tareasPanel','kitsPanel','informesPanel','borradosPanel']);
+  const flexPanels = new Set(['sobrestockPanel','historialPanel','reservasPanel','presupuestoPanel','devolucionesPanel','listasPanel','tareasPanel','kitsPanel','informesPanel','borradosPanel','cargasPanel']);
+  // Las pestañas sin parte central usan también el hueco del centro (03/11/2026).
+  document.body.classList.toggle('panel-ancho', !mainPanels[panelId]);
   const el = document.getElementById(panelId);
   if(el){
     el.classList.remove('hidden');
@@ -12012,10 +12040,19 @@ window._getInventoryRow = getInventoryRow;
 window._getPickedQty = getPickedQty;
 window._getReservedQty = getReservedQty;
 
+// Plegar el catálogo (03/11/2026): en PC se queda como una columna estrecha (y se recuerda);
+// en móvil se abre y cierra encima, como antes. Antes había dos escuchadores que se anulaban
+// entre sí en PC.
+try{ if(localStorage.getItem('sga_catalogo_plegado') === '1') document.body.classList.add('catalogo-plegado'); }catch(e){}
 document.getElementById("toggleCatalog")?.addEventListener("click", ()=>{
   const el = document.getElementById("catalogContent");
   if(!el) return;
-  el.style.display = (el.style.display === "none") ? "block" : "none";
+  if(window.innerWidth > 1200){
+    const plegado = document.body.classList.toggle('catalogo-plegado');
+    try{ localStorage.setItem('sga_catalogo_plegado', plegado ? '1' : '0'); }catch(e){}
+  } else {
+    el.style.display = (el.style.display === "block") ? "none" : "block";
+  }
   renderPendientesVisibles();
 });
 
