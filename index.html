@@ -3979,9 +3979,10 @@ async function borrarFichaInventario(ean){
 }
 
 // Alta de un artículo suelto (10/10/2026): crea ficha de inventario + catálogo SIN tocar ningún otro artículo ni importar todo ClassicGes.
+function familiasExistentes(){ return Array.from(new Set(Object.values(state.inventory.byEan||{}).map(r=>(r.familia||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es')); }
 function abrirModalNuevoArticulo(){
   document.getElementById('nuevoArticuloModal')?.remove();
-  const familias = Array.from(new Set(Object.values(state.inventory.byEan||{}).map(r=>(r.familia||'').trim()).filter(Boolean))).sort();
+  const familias = familiasExistentes();
   const provs = Array.from(new Set(['OKPRO','DINGZHOU','CSP', ...Object.values(state.inventory.byEan||{}).map(r=>(r.proveedor||'').trim()).filter(Boolean)])).sort();
   const modal = document.createElement('div');
   modal.id = 'nuevoArticuloModal';
@@ -5227,12 +5228,15 @@ function openEditStockModal(ean){
   modal.style.cssText = 'position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:20px';
   modal.innerHTML = `
     <div style="background:var(--panel,#1a2332);border-radius:10px;padding:20px;width:100%;max-width:360px;box-shadow:0 4px 24px rgba(0,0,0,0.5)">
-      <div style="font-weight:700;font-size:15px;margin-bottom:4px">✏️ Editar stock</div>
+      <div style="font-weight:700;font-size:15px;margin-bottom:4px">✏️ Editar artículo</div>
       <div style="font-size:11px;color:var(--text-muted,#aaa);margin-bottom:10px">EAN: ${escapeHtml(ean)}</div>
       ${llegadasListaHtml(ean)}
       ${!row.name?`<div style="font-size:11px;padding:6px 8px;background:rgba(229,57,53,0.12);border-radius:4px;margin-bottom:10px;border-left:3px solid var(--danger,#e53935)">⚠️ Esta ficha no tiene nombre guardado — ponle uno para que vuelva a aparecer en el listado normal.</div>`:''}
       <label style="font-size:12px;font-weight:600">Nombre</label>
       <input id="editStockNameInput" class="input" type="text" value="${escapeHtml(row.name||'')}" placeholder="Nombre del artículo" style="width:100%;margin:6px 0 14px 0">
+      <label style="font-size:12px;font-weight:600">Familia</label>
+      <input id="editStockFamiliaInput" class="input" type="text" list="editStockFamiliasList" value="${escapeHtml(row.familia||'')}" placeholder="Elige una o escribe una nueva" style="width:100%;margin:6px 0 14px 0">
+      <datalist id="editStockFamiliasList">${familiasExistentes().map(f=>`<option value="${escapeHtml(f)}">`).join('')}</datalist>
       <label style="font-size:12px;font-weight:600">Stock base</label>
       <input id="editStockInput" class="input" type="number" min="0" value="${row.stockBase}" style="width:100%;margin:6px 0 14px 0">
       <label style="font-size:12px;font-weight:600">Reserva propia (no se vende en Amazon/marketplaces, solo en WooCommerce)</label>
@@ -5264,7 +5268,8 @@ function openEditStockModal(ean){
     state.inventory.byEan[ean].stockBase = newStock;
     state.inventory.byEan[ean].reservaPropia = (isNaN(newReserva) || newReserva < 0) ? 0 : newReserva;
     if(newName) state.inventory.byEan[ean].name = newName;
-    saveCache(); renderInventoryTable(); renderItems($('#search').value); updateStats();
+    state.inventory.byEan[ean].familia = (document.getElementById('editStockFamiliaInput').value||'').trim();
+    saveCache(); renderInventoryTable(); renderItems($('#search').value); updateStats(); renderRecuento();
     await saveInventoryItemRemote(ean, 'edición manual (lápiz)');
     modal.remove();
   });
