@@ -1088,31 +1088,6 @@ const KITS = {
       }
     ]
   },
-  "561": {
-    "nombre": "BFR + BANDAS 23 Y 36 KG + MANC. VINIL. 3KG",
-    "componentes": [
-      {
-        "ean": "764451917972",
-        "nombre": "MANGUITOS DE OCLUSION BFR",
-        "qty": 1
-      },
-      {
-        "ean": "7427245840414",
-        "nombre": "BANDAS ELÁSTICAS 23KG NEGRA",
-        "qty": 1
-      },
-      {
-        "ean": "7427245840421",
-        "nombre": "BANDAS ELÁSTICAS 36KG MORADA",
-        "qty": 1
-      },
-      {
-        "ean": "7427245840223",
-        "nombre": "MANCUERNAS DE COLORES 3KG",
-        "qty": 1
-      }
-    ]
-  },
   "562": {
     "nombre": "PACK DE 20 LOSETAS CAUCHO NEGRO 1X1  10MM",
     "componentes": [
@@ -5109,7 +5084,7 @@ async function importarTarifasDistribuidor(file){
 // Artículos que las Cloud Functions publican SIEMPRE a 0 en Woo, Amazon y Mirakl, aunque tengan
 // stock (solo se venden como componente de kit). Copia de PUBLICAR_SIEMPRE_CERO en
 // functions/stock-common.js — si se cambia allí, cambiarlo aquí también. Guardados sin ceros.
-const PUBLICAR_SIEMPRE_CERO = new Set(['609143531275','657','444','7427251254984']);
+const PUBLICAR_SIEMPRE_CERO = new Set(['609143531275','657','444','7427251254984','654','638','278']);
 function esSoloComponente(ean){
   const d = String(ean == null ? '' : ean).replace(/\D/g, '');
   return PUBLICAR_SIEMPRE_CERO.has(d.replace(/^0+/, '') || d);
@@ -5203,7 +5178,10 @@ function renderInventoryTable(){
   const q = ($('#inventorySearch')?.value || '').trim().toLowerCase(); tbody.innerHTML='';
   const eans = Array.from(new Set([...(state.inventory?.byEan ? Object.keys(state.inventory.byEan) : []), ...state.catalog.map(c=>c.EAN).filter(Boolean)]));
   // Filtrar EANs inválidos (menos de 8 caracteres o que no sean numéricos/alfanuméricos reales)
-  const validEans = eans.filter(ean => ean && ean.length >= 8 && /^[0-9A-Za-z\-]+$/.test(ean));
+  // Los códigos cortos numéricos (425, 41...) son fichas reales tras unificar las dobles (04/11/2026).
+  // Si aún tienen su pareja con ceros (0000000000425) sin unificar, solo se enseña esa.
+  const eansSet = new Set(eans);
+  const validEans = eans.filter(ean => ean && /^[0-9A-Za-z\-]+$/.test(ean) && (ean.length >= 8 || (/^\d+$/.test(ean) && !eansSet.has(ean.padStart(13,'0')))));
   // Las filas sin nombre ni proveedor normalmente se ocultan (son ruido: EANs sueltos sin
   // ficha real) — PERO si se busca el EAN exacto, se enseña igualmente. Así una ficha que
   // se quedó sin nombre por algún fallo (como el de validar/borrar pedidos corregido el
