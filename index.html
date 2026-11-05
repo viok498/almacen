@@ -3270,9 +3270,12 @@ async function saveInventoryItemRemote(ean, origen){
   // validado real con uno viejo — el mismo fallo que borró stock real de varios artículos.
   // Al omitir el campo del todo, el merge deja intacto lo que ya hubiera en Firestore.
   try{
+    // El valor anterior se lee ANTES de escribir (05/11/2026): al hacer setDoc, el onSnapshot de
+    // inventario salta al momento con el valor nuevo y actualiza _baseRemota, así que comparando
+    // después nunca había diferencia y las entradas y ediciones no dejaban movimiento.
+    const antes = _baseRemota.has(ean) ? _baseRemota.get(ean) : 0;
     await setDoc(inventoryRef(ean), { name:row.name||'', stockBase:Number(row.stockBase||0), reservaPropia:Number(row.reservaPropia||0), familia:row.familia||'', refProveedor:row.refProveedor||'', nombreIngles:row.nombreIngles||'', proveedor:row.proveedor||'', importacion:row.importacion||'', updatedAt:serverTimestamp(), updatedBy: currentUid || 'anon' }, { merge:true });
     { // Histórico de movimientos: solo si el Base ha cambiado respecto a lo último conocido en Firestore
-      const antes = _baseRemota.has(ean) ? _baseRemota.get(ean) : 0;
       const despues = Number(row.stockBase||0);
       if(despues !== antes){
         registrarMovimientoStock({ ean, nombre: row.name||'', tipo:'base', delta: despues-antes, antes, despues, origen: origen || 'edición manual' });
@@ -8131,7 +8134,7 @@ function renderMovimientos(){
     lista.map(m=>{
       const d = Number(m.delta||0);
       const col = d > 0 ? '#27ae60' : '#e74c3c';
-      return `<tr style="border-bottom:1px solid var(--muted)"><td style="padding:4px;white-space:nowrap">${escapeHtml(fmtMovFecha(m))}</td><td>${escapeHtml(m.nombre||'')}<div class="small" style="font-family:monospace">${escapeHtml(m.ean||'')}</div></td><td>${m.tipo==='salida'?'Salida (disponible)':'Base'}</td><td style="text-align:right;color:${col};font-weight:700">${d>0?'+':''}${d}</td><td style="text-align:right;white-space:nowrap">${m.antes} → ${m.despues}</td><td>${escapeHtml(m.origen||'')}</td><td>${escapeHtml(m.ref||'')}${m.pack ? `<div class="small" style="color:#e67e22">📦 dentro de ${escapeHtml(m.pack)}</div>` : ''}</td><td>${escapeHtml(m.usuarioEmail||m.usuarioUid||'')}</td></tr>`;
+      return `<tr style="border-bottom:1px solid var(--muted)"><td style="padding:4px;white-space:nowrap">${escapeHtml(fmtMovFecha(m))}</td><td>${escapeHtml(m.nombre||'')}<div class="small" style="font-family:monospace">${escapeHtml(m.ean||'')}</div></td><td>${m.tipo==='salida'?'Salida (disponible)':'Base'}</td><td style="text-align:right;color:${col};font-weight:700">${d>0?'+':''}${d}</td><td style="text-align:right;white-space:nowrap">${m.antes==null ? '—' : `${m.antes} → ${m.despues}`}</td><td>${escapeHtml(m.origen||'')}</td><td>${escapeHtml(m.ref||'')}${m.pack ? `<div class="small" style="color:#e67e22">📦 dentro de ${escapeHtml(m.pack)}</div>` : ''}</td><td>${escapeHtml(m.usuarioEmail||m.usuarioUid||'')}</td></tr>`;
     }).join('')}</tbody></table>`;
 }
 function exportarMovimientosCsv(){
