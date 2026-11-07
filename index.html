@@ -3225,9 +3225,28 @@ function packsDeArticuloEnPedido(orderId, ean){
   }
   return [...new Set(packs)].join(' · ');
 }
+// Ficha real de Firestore para un código de pedido (07/11/2026). Un albarán puede traer el
+// código corto ("594") cuando la ficha está guardada con ceros ("0000000000594"). Antes el
+// descuento iba a "594", que no existía, y se perdía (ALB-A723). Solo mira fichas que existen
+// en Firestore (_baseRemota), no las filas que el SGA crea en memoria al leer el pedido.
+function fichaRemotaPara(ean){
+  const s = String(ean).trim();
+  if(_baseRemota.has(s) || !/^\d{1,13}$/.test(s)) return s;
+  const clave = s.replace(/^0+/, '') || s;
+  for(const k of [clave.padStart(13, '0'), clave]) if(_baseRemota.has(k)) return k;
+  return s;
+}
 async function incrementStockValidatedRemote(ean, delta, ref){
   if(!db || !ean || !delta) return;
   if(String(ean).startsWith('CLIENTE-')) return; // no es inventario operativo real
+  { const real = fichaRemotaPara(ean);
+    if(real !== String(ean)){
+      // El incremento local se hizo en la fila del código del pedido: se pasa a la ficha real.
+      const byEan = state.inventory.byEan;
+      if(byEan[ean]) byEan[ean].stockValidated = Number(byEan[ean].stockValidated||0) - delta;
+      if(byEan[real]) byEan[real].stockValidated = Number(byEan[real].stockValidated||0) + delta;
+      ean = real;
+    } }
   { const _r = state.inventory?.byEan?.[ean];
     if(_r){ const disp = Number(_r.stockBase||0) - Number(_r.stockValidated||0);
       registrarMovimientoStock({ ean, tipo:'salida', delta:-delta, antes:disp+delta, despues:disp,
@@ -3237,11 +3256,13 @@ async function incrementStockValidatedRemote(ean, delta, ref){
   try{
     await updateDoc(inventoryRef(ean), { stockValidated: increment(delta), updatedAt: serverTimestamp(), updatedBy: currentUid || 'anon' });
   }catch(e){
-    // updateDoc falla si el documento todavía no existe en Firestore — en ese caso no hay
-    // nada real que pisar, así que es seguro crearlo con el valor que ya tenemos en local.
+    // updateDoc falla si el documento todavía no existe en Firestore: se crea con el mismo
+    // incremento atómico (07/11/2026). Antes se copiaba el valor local, y si la fila local ya
+    // se había borrado al recargar el inventario se creaba a 0/0, sin nombre, y el descuento se perdía.
     try{
       const row = state.inventory.byEan[ean] || {};
-      await setDoc(inventoryRef(ean), { name:row.name||'', stockBase:Number(row.stockBase||0), stockValidated:Number(row.stockValidated||0), updatedAt: serverTimestamp(), updatedBy: currentUid || 'anon' }, { merge:true });
+      const nombre = row.name || nombreDeEan(ean) || '';
+      await setDoc(inventoryRef(ean), { ...(nombre ? { name: nombre } : {}), stockValidated: increment(delta), updatedAt: serverTimestamp(), updatedBy: currentUid || 'anon' }, { merge:true });
     }catch(e2){ console.error('[Inventario] incrementStockValidatedRemote', ean, e2); }
   }
   setSyncStatus('synced');
