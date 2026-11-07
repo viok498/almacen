@@ -1018,6 +1018,13 @@ function pintarIndicadorSesion(){
 
 // Definición de kits: EAN del kit -> { nombre, componentes:[{ean, nombre, qty}] }
 const KITS = {
+  "5940": {
+    "nombre": "BICI CICLO INDOOR CON CONSOLA",
+    "componentes": [
+      { "ean": "594", "nombre": "BICI CICLO INDOOR", "qty": 1 },
+      { "ean": "648", "nombre": "CONSOLA PARA CICLO INDOOR", "qty": 1 }
+    ]
+  },
   "542": {
     "nombre": "KIT DE B. DE MUSC. Y DISCOS DE PESAS OLÍMPICOS",
     "componentes": [
@@ -5085,7 +5092,7 @@ async function importarTarifasDistribuidor(file){
 // Artículos que las Cloud Functions publican SIEMPRE a 0 en Woo, Amazon y Mirakl, aunque tengan
 // stock (solo se venden como componente de kit). Copia de PUBLICAR_SIEMPRE_CERO en
 // functions/stock-common.js — si se cambia allí, cambiarlo aquí también. Guardados sin ceros.
-const PUBLICAR_SIEMPRE_CERO = new Set(['609143531275','657','444','7427251254984','654','638','278']);
+const PUBLICAR_SIEMPRE_CERO = new Set(['609143531275','657','444','7427251254984','654','638','278','764451917798','458','645','643','644','90001','279','653','277','656','90002','648']);
 function esSoloComponente(ean){
   const d = String(ean == null ? '' : ean).replace(/\D/g, '');
   return PUBLICAR_SIEMPRE_CERO.has(d.replace(/^0+/, '') || d);
