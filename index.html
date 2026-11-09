@@ -927,6 +927,12 @@ body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
 
     <!-- Panel verificación presupuesto -->
     <div id="presupuestoPanel" class="hidden" style="flex-direction:column;flex:1;min-height:0;padding:10px">
+      <div class="panel-title">📋 Presupuestos de las últimas 2 semanas</div>
+      <div class="inline" style="margin-bottom:8px;gap:8px;align-items:center">
+        <label class="small">Mostrar <select id="presupAutoFiltro"><option value="avisos">Con aviso (agotado o pocas unidades)</option><option value="todos">Todos</option></select></label>
+        <span id="presupAutoInfo" class="small" style="color:var(--text-muted,#aaa)"></span>
+      </div>
+      <div id="presupAutoLista" style="max-height:45%;overflow:auto;margin-bottom:14px"></div>
       <div class="panel-title">📋 Verificar presupuesto</div>
       <div class="small" style="margin-bottom:10px;color:var(--text-muted,#aaa)">Sube el Excel o el PDF del presupuesto exportado desde ClassicGes para comprobar si hay stock suficiente.</div>
       <div class="inline" style="margin-bottom:12px;gap:8px">
@@ -1999,6 +2005,32 @@ function safeArray(v){ return Array.isArray(v) ? v : []; }
 function normalizeHeader(h){
   return String(h||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 }
+// Lista automática de presupuestos de las últimas 2 semanas (ver presupuestos-stock.js del watcher).
+function renderPresupAuto(){
+  const cont = $('#presupAutoLista'), info = $('#presupAutoInfo');
+  if(!cont) return;
+  const d = state.presupAuto;
+  if(!d || !Array.isArray(d.presupuestos)){ cont.innerHTML = '<div class="small">Todavía no hay datos del watcher de ClassicGes.</div>'; if(info) info.textContent=''; return; }
+  const color = { 'AGOTADO':'#c0392b', 'POCAS UNIDADES':'#d68910', 'OK':'#27ae60', 'NO EN SGA':'#7f8c8d' };
+  const badge = e => `<span style="background:${color[e]||'#7f8c8d'};color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;white-space:nowrap">${escapeHtml(e)}</span>`;
+  const soloAvisos = ($('#presupAutoFiltro')?.value || 'avisos') === 'avisos';
+  const lista = d.presupuestos.filter(p => !soloAvisos || p.estado === 'AGOTADO' || p.estado === 'POCAS UNIDADES');
+  const n = e => d.presupuestos.filter(p => p.estado === e).length;
+  const act = d.actualizado?.toDate ? d.actualizado.toDate().toLocaleString('es-ES', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+  if(info) info.textContent = `${d.presupuestos.length} presupuestos · ${n('AGOTADO')} con agotado · ${n('POCAS UNIDADES')} con pocas unidades${act ? ' · actualizado ' + act : ''}`;
+  if(!lista.length){ cont.innerHTML = '<div class="small">Ningún presupuesto con aviso.</div>'; return; }
+  cont.innerHTML = lista.map(p => {
+    const lineas = (p.lineas || []).filter(l => !soloAvisos || l.estado !== 'OK');
+    const fecha = String(p.fecha || '').split('-').reverse().join('/');
+    return `<details style="border:1px solid var(--border,#444);border-radius:6px;padding:6px 8px;margin-bottom:6px"${soloAvisos ? ' open' : ''}>
+      <summary style="cursor:pointer"><b>Nº ${escapeHtml(String(p.numero))}</b> · ${escapeHtml(fecha)} · ${escapeHtml(p.cliente || '')} ${badge(p.estado)}</summary>
+      <table class="small" style="width:100%;margin-top:6px;border-collapse:collapse">
+        <tr style="text-align:left"><th>Código</th><th>Artículo</th><th>Cant.</th><th>Disponible</th><th>Estado</th></tr>
+        ${lineas.map(l => `<tr><td>${escapeHtml(l.codigo || '')}</td><td>${escapeHtml(l.nombre || '')}</td><td>${l.qty}</td><td>${l.disponible ?? '—'}</td><td>${badge(l.estado)}</td></tr>`).join('')}
+      </table></details>`;
+  }).join('');
+}
+
 function escapeHtml(str){
   return String(str ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
@@ -2547,6 +2579,12 @@ function subscribeAll(){
     state.llegadas = { porEan: d.porEan || state.llegadas?.porEan || {}, actualizadoISO: d.actualizadoISO || null, ultimoError: d.ultimoError || null };
     pintarEstadoLlegadas(); renderInventoryTable();
   }, err=>console.warn('[llegadas] no se pudo sincronizar (no afecta al resto del SGA):', err?.message||err)));
+  // Presupuestos de las últimas 2 semanas con aviso de stock (09/11/2026): los deja el watcher de
+  // ClassicGes (presupuestos-stock.js) en meta/presupuestosStock. Opcional: si falla, no afecta a nada.
+  unsubscribers.push(onSnapshot(doc(db, 'warehouses', WAREHOUSE_ID, 'meta', 'presupuestosStock'), snap=>{
+    state.presupAuto = snap.exists() ? (snap.data() || null) : null;
+    renderPresupAuto();
+  }, err=>console.warn('[presupuestosStock] no se pudo sincronizar (no afecta al resto del SGA):', err?.message||err)));
   // Recepciones de pedidos de importación (30/10/2026): un pedido marcado como recibido completo
   // deja de salir en las llegadas (ver llegadasPendientes).
   unsubscribers.push(onSnapshot(collection(db, 'warehouses', WAREHOUSE_ID, 'recepcionesImportacion'), snap=>{
@@ -11689,6 +11727,7 @@ document.querySelectorAll('.subtabs button').forEach(btn=>btn.addEventListener('
   $('#historialOperario')?.addEventListener('change', renderHistorial);
   $('#clearPresupuestoBtn')?.addEventListener('click', ()=>{ $('#presupuestoResult').innerHTML=''; $('#presupuestoInfo').textContent=''; });
   $('#presupuestoTabBtn')?.addEventListener('click', ()=>navegarA('presupuestoPanel'));
+  $('#presupAutoFiltro')?.addEventListener('change', renderPresupAuto);
 // Intenta saltar directo al pedido a partir de lo escrito/escaneado en el buscador.
 // Si hay una única coincidencia, abre su detalle y deja el campo listo para el
 // siguiente escaneo; si es ambiguo o no hay match, no hace nada (la lista ya
