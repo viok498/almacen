@@ -5194,7 +5194,10 @@ const URL_LLEGADAS_AHORA = 'https://llegadasactualizarahora-dfqyhilaha-uc.a.run.
 function idPedidoImp(pedido){ return String(pedido || '').trim().replace(/\//g, '_'); }
 function recepcionImp(pedido){ return state.recepcionesImp?.[idPedidoImp(pedido)] || null; }
 function llegadasPendientes(ean){
-  return (state.llegadas?.porEan?.[String(ean == null ? '' : ean).trim()] || []).filter(l=>!recepcionImp(l.pedido)?.completa);
+  // 09/11/2026: casa con o sin ceros (la hoja de importaciones puede traer 0000000000594 y la ficha ser 594).
+  const por = state.llegadas?.porEan || {}, clave = eanClave(ean);
+  const lista = Object.keys(por).filter(k=>eanClave(k)===clave).flatMap(k=>por[k] || []);
+  return lista.filter(l=>!recepcionImp(l.pedido)?.completa).sort((a,b)=>String(a.fecha||'').localeCompare(String(b.fecha||'')));
 }
 function llegadaPendienteEntrada(l){ return l.fecha < fechaLocalYMD(); }
 // Pedidos del CSV que aún no se han recibido completos (para el desplegable de la entrada).
