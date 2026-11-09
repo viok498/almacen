@@ -833,9 +833,7 @@ body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
         <button class="btn" id="tareasDiaAnterior" style="padding:6px 12px">◀</button>
         <div id="tareasFechaLabel" style="font-weight:700;font-size:15px;flex:1;text-align:center"></div>
         <button class="btn" id="tareasDiaSiguiente" style="padding:6px 12px">▶</button>
-        <button class="btn" id="tareasHoyBtn" style="font-size:12px">Hoy</button>
-        <label style="font-size:12px" title="Filtra el tablón por prioridad">🔎 Mostrar <select id="tareasFiltroPrioridad" class="input" style="width:auto"><option value="todas">Todas las prioridades</option><option value="alta">Solo alta</option><option value="media">Solo media</option><option value="baja">Solo baja</option></select></label>
-      </div>
+        <button class="btn" id="tareasHoyBtn" style="font-size:12px">Hoy</button>      </div>
 
       <!-- Añadir tarea -->
       <div class="inline" style="margin-bottom:12px;gap:6px">
@@ -845,7 +843,7 @@ body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
       </div>
       <div class="inline" style="margin-bottom:12px;gap:6px;flex-wrap:wrap;font-size:12px">
         <label>Para <select id="tareasResponsable" class="input" style="width:auto"></select></label>
-        <label>Prioridad <select id="tareasPrioridad" class="input" style="width:auto"><option value="media">Media</option><option value="alta">Alta</option><option value="baja">Baja</option></select></label>
+        <label title="Filtra el tablón. Al añadir una tarea, se crea con esta prioridad (con «Todas», como media)">Prioridad <select id="tareasPrioridad" class="input" style="width:auto"><option value="todas">Todas</option><option value="alta">Alta</option><option value="media">Media</option><option value="baja">Baja</option></select></label>
         <label title="Día en que sale la tarea. Si no se marca como hecha, pasa sola al día siguiente">Fecha <input id="tareasFechaProg" class="input" type="date" style="width:auto"></label>
         <label id="tareasFiltroWrap" style="margin-left:auto;display:none">Ver <select id="tareasFiltro" class="input" style="width:auto"></select></label>
         <button class="btn" id="tareasPlantillasBtn" style="display:none;font-size:12px" title="Rutina diaria y tareas recurrentes de cada persona">⚙️ Plantillas</button>
@@ -9786,7 +9784,7 @@ function tareasVisibles(){
   if(D === hoy) items = items.filter(t=> !t.caducada && (t.creadaFecha||hoy) <= hoy && (!t.hecha || t.hechaFecha === hoy));
   else items = items.filter(t=> t.creadaFecha === D || t.hechaFecha === D);
   // Filtro de prioridad (09/11/2026, Víctor): por defecto "Todas". Las tareas sin prioridad cuentan como media.
-  const fp = $('#tareasFiltroPrioridad')?.value || 'todas';
+  const fp = $('#tareasPrioridad')?.value || 'todas';
   if(fp !== 'todas') items = items.filter(t=> (t.prioridad || 'media') === fp);
   const PRI = { alta:0, media:1, baja:2 };
   items.sort((a,b)=> (a.hecha||a.caducada?1:0)-(b.hecha||b.caducada?1:0) || (PRI[a.prioridad]??1)-(PRI[b.prioridad]??1) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
@@ -9880,7 +9878,7 @@ async function tareasAddTarea(){
     const elegida = $('#tareasFechaProg')?.value || '';
     const creadaFecha = elegida && elegida >= hoy ? elegida : (tareasDate >= hoy ? tareasDate : hoy);
     await setDoc(ref, { texto, creadaFecha, creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false,
-      responsable, area, prioridad:$('#tareasPrioridad')?.value || 'media', fechaLimite:null, descripcion:'',
+      responsable, area, prioridad:(p=>['alta','media','baja'].includes(p) ? p : 'media')($('#tareasPrioridad')?.value), fechaLimite:null, descripcion:'',
       creadoPor:nombreUsuario(currentEmail), creadoPorEmail:currentEmail||null });
     // Si se programa para otro día, se salta a ese día para que se vea dónde ha quedado.
     if(creadaFecha !== tareasDate){ tareasDate = creadaFecha; renderTareas(); }
@@ -11626,7 +11624,7 @@ document.querySelectorAll('.subtabs button').forEach(btn=>btn.addEventListener('
   $('#tareasAddBtn')?.addEventListener('click', tareasAddTarea);
   $('#tareasInput')?.addEventListener('keydown', e=>{ if(e.key==='Enter') tareasAddTarea(); });
   $('#tareasHoyBtn')?.addEventListener('click', ()=>{ tareasDate = fechaLocalYMD(); renderTareas(); });
-  $('#tareasFiltroPrioridad')?.addEventListener('change', renderTareas);
+  $('#tareasPrioridad')?.addEventListener('change', renderTareas);
   $('#tareasDiaAnterior')?.addEventListener('click', ()=>{ tareasDate = tareasDateAdd(-1); renderTareas(); });
   $('#tareasDiaSiguiente')?.addEventListener('click', ()=>{ tareasDate = tareasDateAdd(1); renderTareas(); });
   $('#tareasVozBtn')?.addEventListener('click', ()=>{
