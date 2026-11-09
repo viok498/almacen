@@ -834,6 +834,7 @@ body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
         <div id="tareasFechaLabel" style="font-weight:700;font-size:15px;flex:1;text-align:center"></div>
         <button class="btn" id="tareasDiaSiguiente" style="padding:6px 12px">▶</button>
         <button class="btn" id="tareasHoyBtn" style="font-size:12px">Hoy</button>
+        <label style="font-size:12px">Prioridad <select id="tareasFiltroPrioridad" class="input" style="width:auto"><option value="todas">Todas</option><option value="alta">Alta</option><option value="media">Media</option><option value="baja">Baja</option></select></label>
       </div>
 
       <!-- Añadir tarea -->
@@ -845,7 +846,7 @@ body.panel-ancho #tareasPanel{width:100%;max-width:1100px;margin:0 auto}
       <div class="inline" style="margin-bottom:12px;gap:6px;flex-wrap:wrap;font-size:12px">
         <label>Para <select id="tareasResponsable" class="input" style="width:auto"></select></label>
         <label>Prioridad <select id="tareasPrioridad" class="input" style="width:auto"><option value="media">Media</option><option value="alta">Alta</option><option value="baja">Baja</option></select></label>
-        <label>Fecha límite <input id="tareasFechaLimite" class="input" type="date" style="width:auto"></label>
+        <label title="Día en que sale la tarea. Si no se marca como hecha, pasa sola al día siguiente">Fecha <input id="tareasFechaProg" class="input" type="date" style="width:auto"></label>
         <label id="tareasFiltroWrap" style="margin-left:auto;display:none">Ver <select id="tareasFiltro" class="input" style="width:auto"></select></label>
         <button class="btn" id="tareasPlantillasBtn" style="display:none;font-size:12px" title="Rutina diaria y tareas recurrentes de cada persona">⚙️ Plantillas</button>
       </div>
@@ -9784,6 +9785,9 @@ function tareasVisibles(){
   // de hoy, pero se ven como "no se hizo" al consultar su día.
   if(D === hoy) items = items.filter(t=> !t.caducada && (t.creadaFecha||hoy) <= hoy && (!t.hecha || t.hechaFecha === hoy));
   else items = items.filter(t=> t.creadaFecha === D || t.hechaFecha === D);
+  // Filtro de prioridad (09/11/2026, Víctor): por defecto "Todas". Las tareas sin prioridad cuentan como media.
+  const fp = $('#tareasFiltroPrioridad')?.value || 'todas';
+  if(fp !== 'todas') items = items.filter(t=> (t.prioridad || 'media') === fp);
   const PRI = { alta:0, media:1, baja:2 };
   items.sort((a,b)=> (a.hecha||a.caducada?1:0)-(b.hecha||b.caducada?1:0) || (PRI[a.prioridad]??1)-(PRI[b.prioridad]??1) || String(a.creadaAt||'').localeCompare(String(b.creadaAt||'')));
   return items;
@@ -9809,13 +9813,17 @@ function tareaMetaHtml(t){
     (t.descripcion ? `<div style="font-size:12px;margin-top:3px;color:var(--text-muted)">${escapeHtml(t.descripcion)}</div>` : '');
 }
 
+let _tareasFechaProgDe = null;
 function renderTareas(){
   tareasPrepararControles();
   const label = $('#tareasFechaLabel');
   if(label) label.textContent = tareasDateLabel(tareasDate);
+  const hoy = fechaLocalYMD();
+  // La fecha de la tarea nueva sigue al día que se está viendo (hoy al abrir); nunca un día pasado.
+  const fpInput = $('#tareasFechaProg');
+  if(fpInput){ fpInput.min = hoy; if(_tareasFechaProgDe !== tareasDate){ _tareasFechaProgDe = tareasDate; fpInput.value = tareasDate >= hoy ? tareasDate : hoy; } }
   renderRutina();
   const list = $('#tareasList'); if(!list) return;
-  const hoy = fechaLocalYMD();
   const items = tareasVisibles();
   if(!items.length){
     list.innerHTML = '<div class="note" style="padding:30px;text-align:center;color:var(--text-muted)">No hay tareas en el tablón para este día.<br>Añade una arriba.</div>';
@@ -9868,11 +9876,14 @@ async function tareasAddTarea(){
     const para = $('#tareasResponsable')?.value || 'area:almacen';
     const responsable = para.startsWith('area:') ? null : para;
     const area = para.startsWith('area:') ? para.slice(5) : (SGA_USUARIOS[para]?.area || 'oficina');
-    const fechaLimite = $('#tareasFechaLimite')?.value || null;
-    await setDoc(ref, { texto, creadaFecha: (tareasDate >= hoy ? tareasDate : hoy), creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false,
-      responsable, area, prioridad:$('#tareasPrioridad')?.value || 'media', fechaLimite, descripcion:'',
+    // Fecha programada (09/11/2026, Víctor): la tarea sale ese día y, si no se hace, pasa sola a los siguientes.
+    const elegida = $('#tareasFechaProg')?.value || '';
+    const creadaFecha = elegida && elegida >= hoy ? elegida : (tareasDate >= hoy ? tareasDate : hoy);
+    await setDoc(ref, { texto, creadaFecha, creadaAt:new Date().toISOString(), hecha:false, hechaFecha:null, borrada:false,
+      responsable, area, prioridad:$('#tareasPrioridad')?.value || 'media', fechaLimite:null, descripcion:'',
       creadoPor:nombreUsuario(currentEmail), creadoPorEmail:currentEmail||null });
-    if($('#tareasFechaLimite')) $('#tareasFechaLimite').value = '';
+    // Si se programa para otro día, se salta a ese día para que se vea dónde ha quedado.
+    if(creadaFecha !== tareasDate){ tareasDate = creadaFecha; renderTareas(); }
   }catch(e){ console.error('[Tareas]', e); input.value = texto; alert('No se pudo guardar la tarea: '+(e.message||e)); }
 }
 
@@ -11615,6 +11626,7 @@ document.querySelectorAll('.subtabs button').forEach(btn=>btn.addEventListener('
   $('#tareasAddBtn')?.addEventListener('click', tareasAddTarea);
   $('#tareasInput')?.addEventListener('keydown', e=>{ if(e.key==='Enter') tareasAddTarea(); });
   $('#tareasHoyBtn')?.addEventListener('click', ()=>{ tareasDate = fechaLocalYMD(); renderTareas(); });
+  $('#tareasFiltroPrioridad')?.addEventListener('change', renderTareas);
   $('#tareasDiaAnterior')?.addEventListener('click', ()=>{ tareasDate = tareasDateAdd(-1); renderTareas(); });
   $('#tareasDiaSiguiente')?.addEventListener('click', ()=>{ tareasDate = tareasDateAdd(1); renderTareas(); });
   $('#tareasVozBtn')?.addEventListener('click', ()=>{
