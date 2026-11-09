@@ -9785,17 +9785,23 @@ function tareasEscuchar(){
 // las que ha creado; el administrador ve todas, con un filtro. Es solo la VISTA: los datos
 // son los mismos para todos.
 function tareaArea(t){ return t.area || (t.responsable ? (SGA_USUARIOS[t.responsable]?.area || 'oficina') : 'almacen'); }
+// Lo que ve en su tablón el usuario "email" (09/11/2026: el administrador puede elegir en "Ver"
+// a una persona y ve su tablón tal cual lo ve ella, no solo las tareas asignadas a su nombre).
+function tareaVisiblePara(t, email){
+  const u = SGA_USUARIOS[email] || { area:'oficina' }, area = tareaArea(t);
+  if(t.creadoPorEmail && t.creadoPorEmail === email) return true;
+  if(t.responsable) return t.responsable === email;
+  return area === 'almacen' ? (u.area === 'almacen' || !!u.veAlmacen) : u.area === 'oficina';
+}
 function tareaVisibleParaMi(t){
-  const u = usuarioActual(), area = tareaArea(t);
+  const area = tareaArea(t);
   if(esAdmin()){
     const f = $('#tareasFiltro')?.value || 'todas';
     if(f === 'todas') return true;
     if(f.startsWith('area:')) return !t.responsable && area === f.slice(5);
-    return t.responsable === f;
+    return tareaVisiblePara(t, f);
   }
-  if(t.creadoPorEmail && t.creadoPorEmail === currentEmail) return true;
-  if(t.responsable) return t.responsable === currentEmail;
-  return area === 'almacen' ? (u.area === 'almacen' || !!u.veAlmacen) : u.area === 'oficina';
+  return tareaVisiblePara(t, currentEmail);
 }
 let _tareasControlesDe = null;
 function tareasPrepararControles(){
@@ -9813,7 +9819,8 @@ function tareasPrepararControles(){
   const pb = $('#tareasPlantillasBtn');
   if(pb){ pb.style.display = esAdmin() ? '' : 'none'; pb.onclick = abrirPlantillasModal; }
   if(fs && esAdmin()){
-    fs.innerHTML = [['todas','Todas'], ...opts].map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
+    const vistas = Object.entries(SGA_USUARIOS).map(([email,u])=>[email, `👤 Tablón de ${u.nombre}`]);
+    fs.innerHTML = [['todas','Todas'], ['area:almacen','🏭 Almacén sin asignar'], ['area:oficina','🏢 Oficina sin asignar'], ...vistas].map(([v,t])=>`<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
     fs.onchange = renderTareas;
   }
 }
