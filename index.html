@@ -1010,6 +1010,16 @@ const SGA_USUARIOS = {
 let currentEmail = null;
 function usuarioActual(){ return SGA_USUARIOS[currentEmail] || { nombre:currentEmail||'?', rol:'desconocido', rolTxt:'Sin rol asignado', area:'oficina', color:'#7f8c8d' }; }
 function esAdmin(){ return usuarioActual().rol === 'admin'; }
+function esOficina(){ const u = usuarioActual(); return u.area === 'oficina' && u.rol !== 'desconocido'; }
+// Pedidos "en espera" (11/11/2026, Víctor): nadie puede prepararlos, validarlos, reservarlos ni
+// cambiarlos hasta que oficina los quite de espera con "▶ Reanudar". Antes, validar una línea de un
+// pedido en espera lo pasaba a "en picking" sin avisar y salía de la espera (ALB-A403).
+function bloqueadoPorEspera(order){
+  if(order?.status !== 'on_hold') return false;
+  const motivo = (String(order.notes||'').match(/⏸ En espera: ([^\n]*)/g) || []).pop()?.replace('⏸ En espera: ','') || '';
+  alert(`⏸ El pedido ${order.id} está EN ESPERA${motivo ? ' (' + motivo + ')' : ''}.\n\nNo se puede tocar hasta que oficina lo quite de espera con "▶ Reanudar".`);
+  return true;
+}
 function nombreUsuario(email){ return SGA_USUARIOS[String(email||'').toLowerCase()]?.nombre || email || ''; }
 function pintarIndicadorSesion(){
   const el = document.getElementById('sesionIndicador'); if(!el) return;
@@ -5964,7 +5974,7 @@ window.deleteOrdersBulk = deleteOrdersBulk;
 async function validateOrdersBulk(orderIds){
   const ids = [...orderIds];
   if(!ids.length) return;
-  const orders = ids.map(id=>(state.orders||[]).find(o=>o.id===id)).filter(Boolean).filter(o=>o.status!=='validated');
+  const orders = ids.map(id=>(state.orders||[]).find(o=>o.id===id)).filter(Boolean).filter(o=>o.status!=='validated' && o.status!=='on_hold');
   if(!orders.length){ alert('No hay pedidos pendientes de validar en la selección (puede que ya estuvieran todos validados).'); return; }
 
   const msg = `⚠️ Esto es para PRUEBAS, no para el uso normal del almacén.\n\n`
@@ -6115,6 +6125,7 @@ function checkEanMatchForLine(rawValue, line){
 async function validatePickedLine(orderId, lineIdx, scannedEan, skipEanCheck=false){
   const order = (state.orders||[]).find(o=>o.id===orderId); if(!order) return;
   const line = order.lines[lineIdx]; if(!line) return;
+  if(bloqueadoPorEspera(order)) return;
   if(Number(line.qtyPicked||0) >= Number(line.qty||0)){ alert('La línea ya está completa.'); return; }
   const pendientes = Number(line.qty||0) - Number(line.qtyPicked||0);
 
@@ -6223,6 +6234,7 @@ async function revertOrderToPending(orderId){
 
 async function finalizeOrder(orderId){
   const order = (state.orders||[]).find(o=>o.id===orderId); if(!order) return;
+  if(bloqueadoPorEspera(order)) return;
   const incomplete = order.lines.filter(l=>!(l.esKit && isLegacyExpandedKit(order,l)) && Number(l.qtyPicked||0)<Number(l.qty||0));
   if(incomplete.length){
     // Preguntar si es entrega parcial
@@ -6359,7 +6371,9 @@ function renderOrderDetail(orderId){
     return `<div class="order-line" style="${l.esComponenteKit?'margin-left:12px;border-left:2px solid var(--accent,#2e75b6);':''}"><div class="inline" style="justify-content:space-between"><div><strong>${kitBadge}${escapeHtml(l.name||'(Sin nombre)')}</strong>${l.clienteArticulo ? '' : enlaceWeb(l.ean)}<div class="small">${l.clienteArticulo ? '<span class="badge warn">📦 Artículo cliente</span>' : `EAN ${escapeHtml(l.ean)}`}</div></div>${complete ? '<span class="badge ok">línea validada</span>' : '<span class="badge warn">pendiente</span>'}</div><div class="small" style="margin-top:6px">Pedido: <strong>${l.qty}</strong> · Validado: <strong>${l.qtyPicked||0}</strong>${!l.clienteArticulo ? ` · Disponible app: <strong>${inv.available}</strong>` : ''}</div><div class="small" style="margin-top:4px">${escapeHtml(locText)}</div><div class="inline" style="margin-top:8px">${l.clienteArticulo ? '' : `<input class="input lineScanInput" data-order="${escapeHtml(order.id)}" data-line="${idx}" placeholder="Escanea o escribe EAN" style="flex:1"><button class="btn lineCamBtn" data-order="${escapeHtml(order.id)}" data-line="${idx}" style="padding:6px 10px">📷</button>`}<button class="btn lineScanBtn" data-order="${escapeHtml(order.id)}" data-line="${idx}">✓ Validar línea</button>${(!l.clienteArticulo && !complete) ? `<button class="btn skipEanBtn" data-order="${escapeHtml(order.id)}" data-line="${idx}" style="background:#8e44ad;color:#fff" title="Confía en que has cogido el artículo correcto sin comprobar el código — queda anotado en las notas del pedido">⚡ Validar sin EAN</button>` : ''}<button class="btn gotoLineBtn" data-ean="${escapeHtml(l.ean)}">Ir a ubicación</button>${editEanBtn}</div></div>`;
   }).join('');
   const holdResumeBtn = order.status === 'on_hold'
-    ? `<button class="btn" id="resumeOrderBtn" style="background:#27ae60;color:#fff">▶ Reanudar</button>`
+    ? (esOficina()
+        ? `<button class="btn" id="resumeOrderBtn" style="background:#27ae60;color:#fff">▶ Reanudar</button>`
+        : `<span class="badge warn" title="Solo oficina puede quitarlo de espera">⏸ En espera — solo oficina puede reanudarlo</span>`)
     : `<button class="btn ghost" id="holdOrderBtn">⏸ Poner en espera</button>`;
   const revertBtn = ['validated','partial','picking'].includes(order.status)
     ? `<button class="btn" id="revertOrderBtn" style="background:#e67e22;color:#fff">↩️ Revertir a pendiente</button>`
@@ -6406,8 +6420,9 @@ function renderOrderDetail(orderId){
     </div>`;
   })();
   box.innerHTML = `<div class="inline" style="justify-content:space-between"><div><strong>Pedido ${escapeHtml(order.id)}</strong><div class="small">${escapeHtml(order.channel||'-')} · ${escapeHtml(order.customer||'-')}</div><div class="small">📅 Subido: ${fmtDateTime(order.createdAt)}</div></div><div class="inline" style="gap:4px">${statusBadge(order.status)}${['validated','shipped'].includes(order.status) ? '' : agenciaBadge(order.id)}${mismoClienteBadge(order)}${cambioAgenciaBadge(order)}</div></div>${losetaWarningHtml}${previsionHtml}${seguimientoAvisoHtml}<div class="inline" style="margin-top:8px"><button class="btn" id="setPickingBtn">Marcar en picking</button><button class="btn" id="validateOrderBtn">Validar pedido</button><button class="btn" id="reserveOrderBtn" style="background:#2980b9;color:#fff">📦 Reservar</button><button class="btn" id="incidentOrderBtn">Marcar incidencia</button>${holdResumeBtn}${revertBtn}<button class="btn" id="scanOrderBtn">📷 Escanear línea</button><button class="btn" id="addLineBtn" title="Añade una línea nueva a este pedido (p.ej. una que faltaba por determinar en el albarán)">➕ Añadir línea</button><button class="btn" id="vincularAgenciaBtn" style="background:#8e44ad;color:#fff" title="Escanea la etiqueta de envío de este pedido concreto para vincularlo a su agencia, sin esperar a subir el manifiesto completo">🔗 Vincular envío</button>${deshacerVinculacionBtn}<button class="btn" id="deleteOrderBtn" style="background:#c0392b;color:#fff;margin-left:auto">🗑 Borrar pedido</button></div><div style="margin-top:10px">${linesHtml}</div><div class="section"><div class="panel-title">Notas / incidencia</div><div class="inline" style="gap:6px;align-items:flex-start"><textarea id="orderNotes" class="input" style="flex:1;min-height:80px">${escapeHtml(order.notes||'')}</textarea><button id="voiceNoteBtn" class="btn" title="Dictar nota por voz" style="padding:8px 10px;font-size:18px">🎤</button></div></div>`;
-  $('#deleteOrderBtn').addEventListener('click', ()=>deleteOrder(order.id));
+  $('#deleteOrderBtn').addEventListener('click', ()=>{ if(bloqueadoPorEspera(order)) return; deleteOrder(order.id); });
   $('#setPickingBtn').addEventListener('click', async ()=>{
+    if(bloqueadoPorEspera(order)) return;
     order.status='picking'; if(!order.startedAt) order.startedAt=nowIso(); order.operatorId = state.operatorId || '1'; saveCache(); renderOrders(); await saveOrderRemote(order);
     // En móvil, cerrar el teclado si estaba abierto y volver arriba del panel de picking.
     if(window.innerWidth <= 600){
@@ -6423,7 +6438,7 @@ function renderOrderDetail(orderId){
   });
   $('#direccionEnvioBtn')?.addEventListener('click', ()=>editarDireccionEnvio(order.id));
   $('#noRequiereEnvioBtn')?.addEventListener('click', ()=>marcarNoRequiereEnvio(order.id));
-  $('#incidentOrderBtn').addEventListener('click', async ()=>{ order.status='incident'; saveCache(); renderOrders(); await saveOrderRemote(order); });
+  $('#incidentOrderBtn').addEventListener('click', async ()=>{ if(bloqueadoPorEspera(order)) return; order.status='incident'; saveCache(); renderOrders(); await saveOrderRemote(order); });
   $('#holdOrderBtn')?.addEventListener('click', async ()=>{
     const motivo = prompt('¿Por qué se pone en espera? (opcional, se guarda en las notas del pedido)\nEj: "Esperando llegada de proveedor" / "Pendiente de transferencia"', '');
     order.statusBeforeHold = order.status;
@@ -6433,16 +6448,17 @@ function renderOrderDetail(orderId){
     await saveOrderRemote(order);
   });
   $('#resumeOrderBtn')?.addEventListener('click', async ()=>{
+    if(!esOficina()){ alert('Solo oficina puede quitar un pedido de espera.'); return; }
     order.status = order.statusBeforeHold || 'pending';
-    delete order.statusBeforeHold;
+    order.statusBeforeHold = null; // con "delete" el guardado con merge no lo borraba en Firestore
     saveCache(); renderOrders(); renderOrderDetail(order.id);
     await saveOrderRemote(order);
   });
   $('#validateOrderBtn').addEventListener('click', ()=>finalizeOrder(order.id));
-  $('#revertOrderBtn')?.addEventListener('click', ()=>revertOrderToPending(order.id));
+  $('#revertOrderBtn')?.addEventListener('click', ()=>{ if(bloqueadoPorEspera(order)) return; revertOrderToPending(order.id); });
   $('#reserveOrderBtn')?.addEventListener('click', ()=>reserveOrder(order.id));
   $('#scanOrderBtn').addEventListener('click', ()=>{ state.ui.scanTarget='order'; openScanner(); });
-  $('#addLineBtn')?.addEventListener('click', ()=>{ anadirLineaPedido(order.id); });
+  $('#addLineBtn')?.addEventListener('click', ()=>{ if(bloqueadoPorEspera(order)) return; anadirLineaPedido(order.id); });
   $('#vincularAgenciaBtn')?.addEventListener('click', ()=>{
     state.ui.vincularAgenciaOrder = order.id;
     const input = $('#vincularAgenciaScanInput');
@@ -7025,6 +7041,7 @@ function renderHistorial(){
 
 async function reserveOrder(orderId){
   const order = (state.orders||[]).find(o=>o.id===orderId); if(!order) return;
+  if(bloqueadoPorEspera(order)) return;
   const fechaStr = prompt('¿Fecha prevista de salida? (opcional, ej: 2026-05-15)', '');
   if(fechaStr === null) return; // cancelado
   // Descontar stock al reservar
